@@ -192,3 +192,155 @@ xsgr -h
   port-forward for 7331.
 - **`address already in use`** — another XSGR instance is already running
   on that port; close it or pick another with `-listen :7332`.
+
+## Avoiding router port-forwarding
+
+Today, direct internet connections assume one side can accept an inbound
+TCP connection on the listen port. That usually means a router
+port-forward.
+
+The good news is that XSGR's layers are already separated cleanly:
+
+- `internal/proto` does not depend on sockets and can run over any
+  authenticated byte stream;
+- `internal/transport` is currently a thin TCP dial/listen layer;
+- `internal/session` only needs a connected `FrameIO`.
+
+That means most "no port-forwarding" options can be added without
+changing the end-to-end cryptographic protocol.
+
+### Option 1 — Use an overlay network (best short-term workaround)
+
+Examples: Tailscale, ZeroTier, WireGuard mesh, a private VPN.
+
+How it helps:
+
+- both users join the same overlay;
+- each side gets a reachable private address;
+- XSGR keeps using normal `/connect <addr>` over that overlay.
+
+Work needed in this repository: **very low**.
+
+- No protocol changes.
+- No transport changes.
+- Mostly documentation: explain that an overlay address can be used
+  instead of a public IP.
+
+Tradeoffs:
+
+- easiest path for users today;
+- depends on third-party networking software;
+- not a built-in XSGR feature.
+
+### Option 2 — Add a relay / rendezvous server (best built-in option)
+
+How it helps:
+
+- both peers make outbound connections to a public server;
+- the server either relays encrypted frames, or joins two outbound
+  streams into one session;
+- routers usually allow outbound connections, so no manual
+  port-forwarding is needed.
+
+Work needed in this repository: **medium to high**.
+
+Likely implementation work:
+
+- add a small public service for peer rendezvous and/or frame relay;
+- add a new transport mode alongside direct TCP;
+- add CLI/user flows for publishing presence and connecting by code,
+  name, or relay address;
+- define failure handling, reconnect behavior, and relay authentication.
+
+Why this fits the current design:
+
+- the relay only needs to move opaque encrypted bytes;
+- the existing handshake and message encryption can stay end-to-end.
+
+Tradeoffs:
+
+- most practical built-in solution;
+- requires operating public infrastructure;
+- adds metadata exposure to the relay (who connected and when, but not
+  plaintext if the relay stays below the crypto layer).
+
+### Option 3 — NAT hole punching (true peer-to-peer, but hardest)
+
+How it helps:
+
+- both peers contact a rendezvous service first;
+- the service tells each side the other's observed public endpoint;
+- both sides attempt simultaneous outbound connections to create a
+  direct path through NAT.
+
+Work needed in this repository: **high**.
+
+Likely implementation work:
+
+- add a rendezvous/discovery service;
+- add NAT probing and connection-coordination logic;
+- probably add a UDP transport path, because UDP hole punching is far
+  more practical than TCP hole punching;
+- adapt framing/keepalive/reconnect behavior for the new transport;
+- keep a relay fallback for NATs that cannot be punched.
+
+Why this is expensive here:
+
+- the current transport is TCP-only;
+- successful hole punching depends heavily on router behavior;
+- a production-quality design usually needs fallback relaying anyway.
+
+Tradeoffs:
+
+- preserves direct peer-to-peer connections when it works;
+- most complex option to implement and support;
+- least predictable across home routers and mobile networks.
+
+### Option 4 — Prefer IPv6 when both peers have global IPv6
+
+How it helps:
+
+- if both sides have globally routable IPv6, one peer can listen on an
+  IPv6 address and the other can connect directly.
+
+Work needed in this repository: **low**.
+
+- Go's networking already supports IPv6 addressing.
+- The main work is documentation and UX guidance.
+
+Tradeoffs:
+
+- simple where available;
+- not universal, especially on some home and mobile providers;
+- still requires local firewall rules to allow inbound traffic.
+
+### Option 5 — Automatic port mapping (UPnP / NAT-PMP / PCP)
+
+This does **not** truly avoid port-forwarding; it only automates it.
+
+Work needed in this repository: **medium**.
+
+- add router port-mapping support;
+- surface mapping success/failure in the CLI;
+- handle security concerns around automatically opening ports.
+
+Tradeoffs:
+
+- useful convenience feature;
+- still depends on router support;
+- does not help on restrictive networks where mapping is unavailable.
+
+### Recommendation
+
+If the goal is "no manual router configuration" with the least product
+work, use an overlay network as the immediate answer and document it.
+
+If the goal is a built-in solution inside XSGR, a relay/rendezvous mode
+is the most practical next step. It gives the highest success rate with
+the fewest protocol changes because the existing end-to-end handshake and
+session encryption can remain unchanged.
+
+NAT hole punching is the most "pure" peer-to-peer approach, but it is
+also the largest project and should usually be paired with relay
+fallback, which makes it a later-phase optimization rather than the
+first implementation target.
