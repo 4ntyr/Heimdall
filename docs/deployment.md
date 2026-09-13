@@ -202,8 +202,9 @@ port-forward.
 The good news is that XSGR's layers are already separated cleanly:
 
 - `internal/proto` does not depend on sockets and can run over any
-  authenticated byte stream;
-- `internal/transport` is currently a thin TCP dial/listen layer;
+  reliable, ordered, opaque byte stream;
+- `internal/transport` is currently a thin TCP dial/listen layer that
+  provides that byte-stream contract with length-prefixed frames;
 - `internal/session` only needs a connected `FrameIO`.
 
 That means most "no port-forwarding" options can be added without
@@ -213,7 +214,20 @@ changing the end-to-end cryptographic protocol.
 
 Examples: Tailscale, ZeroTier, WireGuard mesh, a private VPN.
 
-How it helps:
+Technique:
+
+An overlay network installs a virtual network interface on each device
+and creates an encrypted mesh or hub-and-spoke network between members.
+From XSGR's point of view, this usually looks like a normal private IP
+network: each peer gets an address on the overlay, and `/connect` uses
+that address exactly like a LAN address.
+
+This avoids manual router configuration because the overlay software
+handles peer discovery, NAT traversal, relay fallback, or coordination
+itself. XSGR does not need to know which of those mechanisms the overlay
+used; it only sees a working TCP path.
+
+How it helps in practice:
 
 - both users join the same overlay;
 - each side gets a reachable private address;
@@ -221,10 +235,13 @@ How it helps:
 
 Work needed in this repository: **very low**.
 
-- No protocol changes.
-- No transport changes.
-- Mostly documentation: explain that an overlay address can be used
-  instead of a public IP.
+Implementation plan:
+
+1. Document overlay usage in the deployment and quick-start guides.
+2. Add examples that use an overlay IP or overlay DNS name with
+   `/connect`.
+3. Optionally improve error/help text so "friend can't connect" suggests
+   trying an overlay when public inbound access is unavailable.
 
 Tradeoffs:
 
@@ -234,7 +251,21 @@ Tradeoffs:
 
 ### Option 2 — Add a relay / rendezvous server (best built-in option)
 
-How it helps:
+Technique:
+
+A rendezvous service gives peers a shared meeting point on the public
+internet. Each side makes an outbound connection to the service, which
+works on most NATs without router changes. From there, the service can
+either:
+
+- only introduce the peers and help them establish a direct session; or
+- stay in the data path and relay encrypted frames between them.
+
+For XSGR, the second form is the most straightforward first step. The
+existing handshake can still run end-to-end between peers, while the
+relay forwards opaque frames without access to the message plaintext.
+
+How it helps in practice:
 
 - both peers make outbound connections to a public server;
 - the server either relays encrypted frames, or joins two outbound
@@ -246,11 +277,18 @@ Work needed in this repository: **medium to high**.
 
 Likely implementation work:
 
-- add a small public service for peer rendezvous and/or frame relay;
-- add a new transport mode alongside direct TCP;
-- add CLI/user flows for publishing presence and connecting by code,
-  name, or relay address;
-- define failure handling, reconnect behavior, and relay authentication.
+1. Define the relay protocol: session identifiers, authentication,
+   pairing, timeouts, and frame forwarding rules.
+2. Add a small public service for peer rendezvous and/or frame relay.
+3. Add a new client transport mode alongside direct TCP so
+   `internal/session` still receives the same `FrameIO`-style channel.
+4. Add CLI/user flows for publishing presence and connecting by code,
+   invite token, or relay address instead of raw IP entry.
+5. Define reconnect behavior, duplicate-session handling, and relay
+   authentication so malicious third parties cannot trivially hijack a
+   pending rendezvous.
+6. Document the privacy model clearly: the relay learns connection
+   metadata, but payloads remain end-to-end encrypted.
 
 Why this fits the current design:
 
@@ -266,7 +304,22 @@ Tradeoffs:
 
 ### Option 3 — NAT hole punching (true peer-to-peer, but hardest)
 
-How it helps:
+Technique:
+
+Hole punching tries to create a direct path between two peers behind
+NATs without requiring manual forwarding. A public rendezvous server
+first observes each peer's public address and port. It then tells each
+peer where to send packets, and both sides transmit at roughly the same
+time so their NAT devices create matching temporary mappings.
+
+In practice, this is usually done with UDP, not raw TCP, because UDP
+hole punching is far more widely supported by consumer NATs. That is an
+important fit issue for XSGR: the protocol expects a reliable, ordered,
+opaque byte stream, so a UDP path would need an adaptation layer that
+provides stream-like reliability/ordering semantics, or the project
+would need to adopt an equivalent transport such as QUIC.
+
+How it helps in practice:
 
 - both peers contact a rendezvous service first;
 - the service tells each side the other's observed public endpoint;
@@ -277,12 +330,20 @@ Work needed in this repository: **high**.
 
 Likely implementation work:
 
-- add a rendezvous/discovery service;
-- add NAT probing and connection-coordination logic;
-- probably add a UDP transport path, because UDP hole punching is far
-  more practical than TCP hole punching;
-- adapt framing/keepalive/reconnect behavior for the new transport;
-- keep a relay fallback for NATs that cannot be punched.
+1. Add a rendezvous/discovery service that records each peer's observed
+   endpoint and coordinates connection attempts.
+2. Add NAT probing and simultaneous-connect orchestration in the client.
+3. Add a UDP-capable transport path, plus a reliability/ordering layer
+   that turns it into the byte-stream contract required by
+   `internal/proto`; alternatively, adopt a transport with those
+   guarantees already built in.
+4. Rework framing, keepalive, timeout, and reconnect behavior for a
+   path that may change addresses or partially fail during setup.
+5. Add relay fallback for NATs that cannot be punched, otherwise users
+   would still have many failed connections.
+6. Add extensive interoperability testing across common NAT types,
+   because this feature's correctness depends as much on real networks
+   as on local code.
 
 Why this is expensive here:
 
@@ -298,15 +359,35 @@ Tradeoffs:
 
 ### Option 4 — Prefer IPv6 when both peers have global IPv6
 
-How it helps:
+Technique:
+
+IPv6 can remove the specific NAT problem entirely when both peers have
+globally routable IPv6 addresses. Instead of punching through or
+forwarding an IPv4 NAT, one peer simply listens on an IPv6 address and
+the other connects to that address.
+
+This is not universal internet reachability: local firewalls still need
+to allow inbound traffic, and many networks either lack IPv6 entirely or
+use policies that still make direct inbound access unreliable. But where
+it exists, it is the cleanest direct-connection model.
+
+How it helps in practice:
 
 - if both sides have globally routable IPv6, one peer can listen on an
   IPv6 address and the other can connect directly.
 
 Work needed in this repository: **low**.
 
-- Go's networking already supports IPv6 addressing.
-- The main work is documentation and UX guidance.
+Implementation plan:
+
+1. Verify and document the exact address formats users should pass to
+   `/connect` for IPv6 endpoints.
+2. Add deployment guidance for checking whether an address is globally
+   reachable rather than link-local or ULA-only.
+3. Test listener and dialer behavior on dual-stack hosts to make sure
+   the current TCP transport handles expected IPv6 cases cleanly.
+4. Update troubleshooting text so users know IPv6 is a valid alternative
+   when both networks support it.
 
 Tradeoffs:
 
@@ -318,11 +399,30 @@ Tradeoffs:
 
 This does **not** truly avoid port-forwarding; it only automates it.
 
+Technique:
+
+These protocols let a program ask the local router to create a temporary
+inbound mapping automatically. The application still relies on an
+inbound public port; the difference is that the user does not have to
+open the router admin page and configure the mapping manually.
+
+This is best seen as a convenience feature for the existing direct-TCP
+design, not as a new connectivity model.
+
 Work needed in this repository: **medium**.
 
-- add router port-mapping support;
-- surface mapping success/failure in the CLI;
-- handle security concerns around automatically opening ports.
+Implementation plan:
+
+1. Add router discovery and mapping support for one or more of UPnP,
+   NAT-PMP, or PCP.
+2. Request and renew a mapping for the listen port while XSGR is
+   running, then release it on shutdown when possible.
+3. Surface mapping success, failure, lease duration, and discovered
+   external address clearly in the CLI.
+4. Add configuration flags so users can opt in or out instead of always
+   opening ports automatically.
+5. Document the security implications: this exposes a public inbound
+   port and depends on trusting the local network and router behavior.
 
 Tradeoffs:
 
