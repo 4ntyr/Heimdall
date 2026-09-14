@@ -1,5 +1,5 @@
 // Package crypto provides thin wrappers over the Go standard library
-// cryptographic primitives used by Xessenger: OS CSPRNG randomness,
+// cryptographic primitives used by Heimdall: OS CSPRNG randomness,
 // AES-256-GCM authenticated encryption, and HKDF-SHA-256 key derivation.
 //
 // No custom cryptography lives here: every construction is a direct,

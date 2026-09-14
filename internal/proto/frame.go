@@ -1,4 +1,4 @@
-// Package proto implements the Xessenger cryptographic wire protocol
+// Package proto implements the Heimdall cryptographic wire protocol
 // specified in docs/protocol.md:
 //
 //   - authenticated handshake (ephemeral X25519 + Ed25519-signed transcript)

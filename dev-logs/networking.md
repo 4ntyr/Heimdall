@@ -1,4 +1,4 @@
-# Networking: options that can be built into XSGR
+# Networking: options that can be built into HMDL
 
 This file collects the NAT-traversal / no-manual-port-forwarding options
 from `docs/deployment.md` ("Avoiding router port-forwarding") that can be
@@ -6,10 +6,10 @@ implemented inside the application itself.
 
 Excluded: **overlay networks** (Tailscale, ZeroTier, WireGuard mesh, private
 VPN). That option is external third-party networking software and cannot be
-built into XSGR — it is a workaround users apply outside the application,
+built into HMDL — it is a workaround users apply outside the application,
 not an application feature.
 
-Context: XSGR's layers are separated cleanly:
+Context: HMDL's layers are separated cleanly:
 
 - `internal/proto` does not depend on sockets and can run over any
   reliable, ordered, opaque byte stream;
@@ -32,7 +32,7 @@ either:
 - only introduce the peers and help them establish a direct session; or
 - stay in the data path and relay encrypted frames between them.
 
-For XSGR, the second form is the most straightforward first step. The
+For HMDL, the second form is the most straightforward first step. The
 existing handshake can still run end-to-end between peers, while the
 relay forwards opaque frames without access to the message plaintext.
 
@@ -85,7 +85,7 @@ time so their NAT devices create matching temporary mappings.
 
 In practice, this is usually done with UDP, not raw TCP, because UDP
 hole punching is far more widely supported by consumer NATs. That is an
-important fit issue for XSGR: the protocol expects a reliable, ordered,
+important fit issue for HMDL: the protocol expects a reliable, ordered,
 opaque byte stream, so a UDP path would need an adaptation layer that
 provides stream-like reliability/ordering semantics, or the project
 would need to adopt an equivalent transport such as QUIC.
@@ -186,7 +186,7 @@ Implementation plan:
 
 1. Add router discovery and mapping support for one or more of UPnP,
    NAT-PMP, or PCP.
-2. Request and renew a mapping for the listen port while XSGR is
+2. Request and renew a mapping for the listen port while HMDL is
    running, then release it on shutdown when possible.
 3. Surface mapping success, failure, lease duration, and discovered
    external address clearly in the CLI.
@@ -203,7 +203,7 @@ Tradeoffs:
 
 ## Recommendation
 
-For a built-in solution inside XSGR, a relay/rendezvous mode (Option A)
+For a built-in solution inside HMDL, a relay/rendezvous mode (Option A)
 is the most practical next step. It gives the highest success rate with
 the fewest protocol changes because the existing end-to-end handshake
 and session encryption can remain unchanged.

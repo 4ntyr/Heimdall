@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/4ntyr/xessenger_cli/internal/identity"
+	"github.com/4ntyr/heimdall/internal/identity"
 )
 
 // TrustLevel describes how much we trust a peer's presented identity.

@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/4ntyr/xessenger_cli/internal/identity"
-	"github.com/4ntyr/xessenger_cli/internal/peers"
-	"github.com/4ntyr/xessenger_cli/internal/proto"
-	"github.com/4ntyr/xessenger_cli/internal/transport"
+	"github.com/4ntyr/heimdall/internal/identity"
+	"github.com/4ntyr/heimdall/internal/peers"
+	"github.com/4ntyr/heimdall/internal/proto"
+	"github.com/4ntyr/heimdall/internal/transport"
 )
 
 // EventType classifies Events emitted by the Manager.

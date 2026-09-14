@@ -8,8 +8,8 @@ import (
 	"errors"
 	"fmt"
 
-	xcrypto "github.com/4ntyr/xessenger_cli/internal/crypto"
-	"github.com/4ntyr/xessenger_cli/internal/identity"
+	xcrypto "github.com/4ntyr/heimdall/internal/crypto"
+	"github.com/4ntyr/heimdall/internal/identity"
 )
 
 // Handshake (docs/protocol.md §3). Noise-style XX pattern: ephemeral X25519,
@@ -20,7 +20,7 @@ import (
 //	msg2  B → A  Auth { ephB_pub || Enc_k2(idB, nameB, Sig_B(h)) }   (eph clear, auth encrypted)
 //	msg3  A → B  Auth { ephA_pub || Enc_k3(idA, nameA, Sig_A(h)) }   (eph clear, auth encrypted)
 //
-//	h = SHA256("xessenger v1 handshake" || ephA_pub || ephB_pub)
+//	h = SHA256("heimdall v1 handshake" || ephA_pub || ephB_pub)
 //
 // The ephemeral public keys travel in the clear: they are not secret, and
 // each side's signature over the transcript hash binds BOTH ephemeral keys,
@@ -34,7 +34,7 @@ var (
 
 // handshakeDomain separates the transcript hash from every other SHA-256
 // use in the protocol.
-var handshakeDomain = []byte("xessenger v1 handshake")
+var handshakeDomain = []byte("heimdall v1 handshake")
 
 const (
 	hsTypeInit  byte = 1
@@ -353,4 +353,4 @@ func parseAuthPlain(b []byte) (ed25519.PublicKey, string, []byte, error) {
 }
 
 // hsAAD is the additional authenticated data for handshake ciphertexts.
-func hsAAD() []byte { return []byte("xessenger v1 hs aad") }
+func hsAAD() []byte { return []byte("heimdall v1 hs aad") }
