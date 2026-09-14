@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/4ntyr/heimdall_cli/internal/identity"
+	"github.com/4ntyr/heimdall/internal/identity"
 )
 
 // newPair returns an established initiator/responder session pair.

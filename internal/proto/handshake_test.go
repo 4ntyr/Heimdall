@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/4ntyr/heimdall_cli/internal/identity"
+	"github.com/4ntyr/heimdall/internal/identity"
 )
 
 // runHandshake performs a complete in-memory handshake between two

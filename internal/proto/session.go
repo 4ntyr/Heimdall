@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync"
 
-	xcrypto "github.com/4ntyr/heimdall_cli/internal/crypto"
+	xcrypto "github.com/4ntyr/heimdall/internal/crypto"
 )
 
 // HKDF info labels. Every derived key uses a distinct label so keys for

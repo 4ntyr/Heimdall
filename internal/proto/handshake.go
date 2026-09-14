@@ -8,8 +8,8 @@ import (
 	"errors"
 	"fmt"
 
-	xcrypto "github.com/4ntyr/heimdall_cli/internal/crypto"
-	"github.com/4ntyr/heimdall_cli/internal/identity"
+	xcrypto "github.com/4ntyr/heimdall/internal/crypto"
+	"github.com/4ntyr/heimdall/internal/identity"
 )
 
 // Handshake (docs/protocol.md §3). Noise-style XX pattern: ephemeral X25519,

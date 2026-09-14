@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/4ntyr/heimdall_cli/internal/identity"
+	"github.com/4ntyr/heimdall/internal/identity"
 )
 
 func newKey(t *testing.T) ed25519.PublicKey {

@@ -20,7 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	xcrypto "github.com/4ntyr/heimdall_cli/internal/crypto"
+	xcrypto "github.com/4ntyr/heimdall/internal/crypto"
 )
 
 // identityFileVersion is the version byte of the on-disk identity format.

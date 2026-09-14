@@ -113,8 +113,8 @@ After both signatures verify, each side:
 root     := HKDF(shared, salt=h, info="heimdall v1 root")
 k(msg2)  := HKDF(shared, salt=h, info="heimdall v1 hs2")
 k(msg3)  := HKDF(shared, salt=h, info="heimdall v1 hs3")
-send_A   := HKDF(root, info="heimdall v1 send A→B")   // per-direction chains
-send_B   := HKDF(root, info="heimdall v1 send B→A")
+send_A   := HKDF(root, info="heimdall v1 send A-to-B")   // per-direction chains
+send_B   := HKDF(root, info="heimdall v1 send B-to-A")
 ```
 
 Directional chains mean sender and receiver keys are independent. `h` (the

@@ -11,8 +11,8 @@ dependencies** (no Python/Node/Java, no system services, no package manager).
    see `docs/protocol.md`) before the implementation. Cryptography never
    depends on the CLI, and the CLI never touches cryptographic primitives.
 2. **Modularity.** Every layer has a single responsibility and a narrow API.
-   Every layer except `cmd/heimdall` can be tested without a terminal and
-   without real network connections.
+   Every layer except the `main` package (the repository root) can be tested
+   without a terminal and without real network connections.
 3. **No custom cryptography.** Only well-established constructions provided by
    the Go standard library are used: X25519 (`crypto/ecdh`), Ed25519
    (`crypto/ed25519`), AES-256-GCM (`crypto/aes`+`crypto/cipher`),
@@ -25,9 +25,7 @@ dependencies** (no Python/Node/Java, no system services, no package manager).
 ## Layer overview
 
 ```
-CLI (internal/ui)
- │
- ├── Chat / Message Handling      internal/chat
+CLI (main, repository root)
  │
  ├── Peer Manager                 internal/session   (connections, lifecycle)
  │       └── Trust Store          internal/peers    (known keys, verification)
@@ -49,12 +47,13 @@ CLI (internal/ui)
 Dependency direction is strictly top-down. Notable rules:
 
 - `internal/proto` (the cryptographic protocol) imports only `internal/crypto`,
-  `internal/identity`, `internal/peers` and the standard library. It has **no
-  knowledge of the CLI or the network**.
+  `internal/identity` and the standard library. It has **no knowledge of the
+  CLI or the network**.
 - `internal/transport` moves opaque bytes only. It has **no knowledge of
   terminal rendering or cryptography**.
-- `internal/ui` talks to `internal/chat` through small channel-based
-  interfaces, so chat logic is fully testable headlessly.
+- The `main` package talks to `internal/session` through a small
+  channel-based event interface, so session logic is fully testable
+  headlessly.
 
 ## Layer responsibilities
 
@@ -66,10 +65,7 @@ Dependency direction is strictly top-down. Notable rules:
 | `internal/proto` | Wire format, authenticated handshake (X25519 + Ed25519-signed transcript), session ratchet, replay protection, key rotation | sockets, terminal |
 | `internal/transport` | TCP listen/dial, length-prefixed framed messages, I/O deadlines | protocol semantics |
 | `internal/session` | Connection lifecycle: inbound/outbound, handshake driving, keepalive, disconnect detection, automatic reconnect, per-peer send queues | rendering |
-| `internal/chat` | Message model, history, command parsing (`/help`, `/peers`, ...), event fan-out | cryptography |
-| `internal/ui` | Minimal boxed terminal rendering, input handling | protocol details |
-| `internal/config` | Flags and config file | — |
-| `cmd/heimdall` | `main`: wiring only | logic |
+| `main` (repository root) | CLI wiring: flags, REPL, event printing | logic |
 
 ## Security properties (summary)
 

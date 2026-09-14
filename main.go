@@ -14,9 +14,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/4ntyr/heimdall_cli/internal/identity"
-	"github.com/4ntyr/heimdall_cli/internal/peers"
-	"github.com/4ntyr/heimdall_cli/internal/session"
+	"github.com/4ntyr/heimdall/internal/identity"
+	"github.com/4ntyr/heimdall/internal/peers"
+	"github.com/4ntyr/heimdall/internal/session"
 )
 
 const usageText = `hmdl — terminal-only, peer-to-peer, end-to-end encrypted messenger

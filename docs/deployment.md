@@ -31,12 +31,12 @@ HMDL is written in Go. You need **Go 1.24 or newer**.
 If you have Git installed:
 
 ```sh
-git clone https://github.com/4ntyr/heimdall_cli.git
-cd heimdall_cli
+git clone https://github.com/4ntyr/heimdall.git
+cd heimdall
 ```
 
 If you don't have Git, download the ZIP from
-<https://github.com/4ntyr/heimdall_cli> (green **Code** button →
+<https://github.com/4ntyr/heimdall> (green **Code** button →
 **Download ZIP**), extract it, and open a terminal inside the extracted
 folder.
 
@@ -106,10 +106,10 @@ GOOS=linux GOARCH=amd64 go build -o hmdl .
 ### Installing onto your PATH (optional)
 
 ```sh
-go install github.com/4ntyr/heimdall_cli@latest
+go install github.com/4ntyr/heimdall@latest
 ```
 
-This puts a binary named `heimdall_cli` into your Go bin directory
+This puts a binary named `heimdall` into your Go bin directory
 (usually `~/go/bin`). Make sure that directory is on your `PATH` —
 `go env GOBIN` or `go env GOPATH` tells you where it is.
 
