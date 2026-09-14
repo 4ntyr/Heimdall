@@ -1,4 +1,4 @@
-// Command xsgr is the entry point of Xessenger (production name XSGR), a
+// Command hmdl is the entry point of Heimdall (production name HMDL), a
 // terminal-only, peer-to-peer, end-to-end encrypted messenger. This file
 // only wires the internal packages together; all logic lives in internal/.
 package main
@@ -14,15 +14,15 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/4ntyr/xessenger_cli/internal/identity"
-	"github.com/4ntyr/xessenger_cli/internal/peers"
-	"github.com/4ntyr/xessenger_cli/internal/session"
+	"github.com/4ntyr/heimdall_cli/internal/identity"
+	"github.com/4ntyr/heimdall_cli/internal/peers"
+	"github.com/4ntyr/heimdall_cli/internal/session"
 )
 
-const usageText = `xsgr — terminal-only, peer-to-peer, end-to-end encrypted messenger
+const usageText = `hmdl — terminal-only, peer-to-peer, end-to-end encrypted messenger
 
 Usage:
-  xsgr [flags]
+  hmdl [flags]
 
 Flags:
   -name     your display name (required on first run; afterwards read from
@@ -30,7 +30,7 @@ Flags:
   -listen   address to listen on for incoming peers (default ":7331")
   -connect  address of a peer to connect to on startup, e.g. 192.168.1.5:7331
   -data     directory for the identity and trust store
-            (default "~/.xessenger")
+            (default "~/.heimdall")
 
 Interactive commands:
   /connect <addr>     connect to a peer
@@ -44,13 +44,13 @@ Interactive commands:
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "xsgr:", err)
+		fmt.Fprintln(os.Stderr, "hmdl:", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	fs := flag.NewFlagSet("xsgr", flag.ContinueOnError)
+	fs := flag.NewFlagSet("hmdl", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usageText) }
 	name := fs.String("name", "", "display name (required on first run)")
 	listen := fs.String("listen", ":7331", "address to listen on")
@@ -81,7 +81,7 @@ func run() error {
 
 	if *connect != "" {
 		if err := mgr.Connect(*connect); err != nil {
-			fmt.Fprintf(os.Stderr, "xsgr: connect to %s: %v\n", *connect, err)
+			fmt.Fprintf(os.Stderr, "hmdl: connect to %s: %v\n", *connect, err)
 		}
 	}
 
@@ -115,22 +115,22 @@ func run() error {
 	return nil
 }
 
-// defaultDataDir returns ~/.xessenger, falling back to the current
+// defaultDataDir returns ~/.heimdall, falling back to the current
 // directory if the home directory cannot be determined.
 func defaultDataDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".xessenger"
+		return ".heimdall"
 	}
-	return filepath.Join(home, ".xessenger")
+	return filepath.Join(home, ".heimdall")
 }
 
 // loadOrCreateIdentity loads the identity file if it exists, otherwise
 // generates a new identity and saves it encrypted with a passphrase the
-// user is prompted for. The passphrase is read from the XSGR_PASSPHRASE
+// user is prompted for. The passphrase is read from the HMDL_PASSPHRASE
 // environment variable if set, otherwise interactively from the terminal.
 func loadOrCreateIdentity(dataDir, name string) (*identity.Identity, error) {
-	path := filepath.Join(dataDir, "identity.xsgr")
+	path := filepath.Join(dataDir, "identity.hmdl")
 
 	if _, err := os.Stat(path); err == nil {
 		pass, err := readPassphrase("Identity passphrase: ")
@@ -163,11 +163,11 @@ func loadOrCreateIdentity(dataDir, name string) (*identity.Identity, error) {
 	return id, nil
 }
 
-// readPassphrase reads a passphrase from the XSGR_PASSPHRASE environment
+// readPassphrase reads a passphrase from the HMDL_PASSPHRASE environment
 // variable, or prompts on the terminal. Interactive entry is only used so
 // the CLI stays standard-library only.
 func readPassphrase(prompt string) (string, error) {
-	if p := os.Getenv("XSGR_PASSPHRASE"); p != "" {
+	if p := os.Getenv("HMDL_PASSPHRASE"); p != "" {
 		return p, nil
 	}
 	fmt.Fprint(os.Stderr, prompt)

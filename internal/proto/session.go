@@ -7,21 +7,21 @@ import (
 	"fmt"
 	"sync"
 
-	xcrypto "github.com/4ntyr/xessenger_cli/internal/crypto"
+	xcrypto "github.com/4ntyr/heimdall_cli/internal/crypto"
 )
 
 // HKDF info labels. Every derived key uses a distinct label so keys for
 // different purposes are independent (explicit key separation, §5).
 const (
-	infoRoot    = "xessenger v1 root"
-	infoHS2     = "xessenger v1 hs2"
-	infoHS3     = "xessenger v1 hs3"
-	infoSendAB  = "xessenger v1 send A-to-B"
-	infoSendBA  = "xessenger v1 send B-to-A"
-	infoRatchet = "xessenger v1 ratchet"
-	infoMsg     = "xessenger v1 msg"
-	infoRotate  = "xessenger v1 rotate"
-	infoSession = "xessenger v1 session id"
+	infoRoot    = "heimdall v1 root"
+	infoHS2     = "heimdall v1 hs2"
+	infoHS3     = "heimdall v1 hs3"
+	infoSendAB  = "heimdall v1 send A-to-B"
+	infoSendBA  = "heimdall v1 send B-to-A"
+	infoRatchet = "heimdall v1 ratchet"
+	infoMsg     = "heimdall v1 msg"
+	infoRotate  = "heimdall v1 rotate"
+	infoSession = "heimdall v1 session id"
 )
 
 // rotationInterval is the number of sent messages after which the session

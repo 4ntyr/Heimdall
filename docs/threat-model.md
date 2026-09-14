@@ -1,7 +1,7 @@
 # Threat Model
 
-This document defines what Xessenger is designed to protect against and what it
-explicitly **cannot** protect against. Xessenger does not claim absolute
+This document defines what Heimdall is designed to protect against and what it
+explicitly **cannot** protect against. Heimdall does not claim absolute
 security; it aims for the properties expected from a modern secure messenger,
 using only well-established cryptographic constructions (see
 `docs/protocol.md`).
@@ -51,7 +51,7 @@ We assume an adversary who can:
 
 ## Not protected against
 
-Xessenger cannot protect against:
+Heimdall cannot protect against:
 
 - **Fully compromised endpoint.** Malware with access to process memory can read
   keys and plaintext. No application-level cryptography can prevent this.

@@ -1,6 +1,6 @@
 # Architecture
 
-Xessenger is a terminal-only, peer-to-peer, end-to-end encrypted messenger. It is
+Heimdall is a terminal-only, peer-to-peer, end-to-end encrypted messenger. It is
 written in Go using **only the standard library**, so it compiles to a single
 self-contained static executable for Windows and Linux with **zero runtime
 dependencies** (no Python/Node/Java, no system services, no package manager).
@@ -11,7 +11,7 @@ dependencies** (no Python/Node/Java, no system services, no package manager).
    see `docs/protocol.md`) before the implementation. Cryptography never
    depends on the CLI, and the CLI never touches cryptographic primitives.
 2. **Modularity.** Every layer has a single responsibility and a narrow API.
-   Every layer except `cmd/xessenger` can be tested without a terminal and
+   Every layer except `cmd/heimdall` can be tested without a terminal and
    without real network connections.
 3. **No custom cryptography.** Only well-established constructions provided by
    the Go standard library are used: X25519 (`crypto/ecdh`), Ed25519
@@ -69,7 +69,7 @@ Dependency direction is strictly top-down. Notable rules:
 | `internal/chat` | Message model, history, command parsing (`/help`, `/peers`, ...), event fan-out | cryptography |
 | `internal/ui` | Minimal boxed terminal rendering, input handling | protocol details |
 | `internal/config` | Flags and config file | — |
-| `cmd/xessenger` | `main`: wiring only | logic |
+| `cmd/heimdall` | `main`: wiring only | logic |
 
 ## Security properties (summary)
 

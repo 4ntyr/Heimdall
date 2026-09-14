@@ -1,3 +1,3 @@
-module github.com/4ntyr/xessenger_cli
+module github.com/4ntyr/heimdall_cli
 
 go 1.24

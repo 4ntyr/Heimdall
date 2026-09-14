@@ -1,4 +1,4 @@
-# Xessenger Protocol Specification
+# Heimdall Protocol Specification
 
 Version: 1
 
@@ -110,11 +110,11 @@ After both signatures verify, each side:
 ## 5. Key derivation (HKDF-SHA-256)
 
 ```
-root     := HKDF(shared, salt=h, info="xessenger v1 root")
-k(msg2)  := HKDF(shared, salt=h, info="xessenger v1 hs2")
-k(msg3)  := HKDF(shared, salt=h, info="xessenger v1 hs3")
-send_A   := HKDF(root, info="xessenger v1 send A→B")   // per-direction chains
-send_B   := HKDF(root, info="xessenger v1 send B→A")
+root     := HKDF(shared, salt=h, info="heimdall v1 root")
+k(msg2)  := HKDF(shared, salt=h, info="heimdall v1 hs2")
+k(msg3)  := HKDF(shared, salt=h, info="heimdall v1 hs3")
+send_A   := HKDF(root, info="heimdall v1 send A→B")   // per-direction chains
+send_B   := HKDF(root, info="heimdall v1 send B→A")
 ```
 
 Directional chains mean sender and receiver keys are independent. `h` (the
@@ -170,8 +170,8 @@ sequence numbers:
 - `seq <= highest - 1024` → drop (too old).
 
 **Ratchet (per-message).** After each message in a direction, that direction's
-chain key advances: `chain' := HKDF(chain, info="xessenger v1 ratchet")`, and
-the message key is `HKDF(chain, info="xessenger v1 msg")`. Old chain keys are
+chain key advances: `chain' := HKDF(chain, info="heimdall v1 ratchet")`, and
+the message key is `HKDF(chain, info="heimdall v1 msg")`. Old chain keys are
 discarded, so compromise of the current state does not expose earlier messages
 (forward secrecy within a session), and each message uses a unique key.
 

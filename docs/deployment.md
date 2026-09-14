@@ -3,14 +3,14 @@
 This guide takes you from zero to chatting, step by step. No prior Go
 experience is needed — just follow the instructions for your platform.
 
-XSGR is a single self-contained executable: once built, it needs nothing
+HMDL is a single self-contained executable: once built, it needs nothing
 else to run (no Python, no Node, no services, no package manager).
 
 ---
 
 ## Step 1 — Install Go
 
-XSGR is written in Go. You need **Go 1.24 or newer**.
+HMDL is written in Go. You need **Go 1.24 or newer**.
 
 1. Go to <https://go.dev/dl/> and download the installer for your system
    (Windows `.msi`, macOS `.pkg`, or Linux `.tar.gz`).
@@ -31,12 +31,12 @@ XSGR is written in Go. You need **Go 1.24 or newer**.
 If you have Git installed:
 
 ```sh
-git clone https://github.com/4ntyr/xessenger_cli.git
-cd xessenger_cli
+git clone https://github.com/4ntyr/heimdall_cli.git
+cd heimdall_cli
 ```
 
 If you don't have Git, download the ZIP from
-<https://github.com/4ntyr/xessenger_cli> (green **Code** button →
+<https://github.com/4ntyr/heimdall_cli> (green **Code** button →
 **Download ZIP**), extract it, and open a terminal inside the extracted
 folder.
 
@@ -51,7 +51,7 @@ everything; later runs are instant.
 
 On the **first run** you will be asked to choose a passphrase. This
 passphrase encrypts your identity file (your private key) on disk —
-don't forget it. XSGR then prints:
+don't forget it. HMDL then prints:
 
 - your **identity fingerprint** — this is how other people verify it's
   really you;
@@ -61,14 +61,14 @@ Every later run is just `go run .` (no `-name` needed; your identity is
 loaded from disk) plus your passphrase.
 
 > **Tip:** to avoid typing the passphrase each time, set the environment
-> variable `XSGR_PASSPHRASE`:
+> variable `HMDL_PASSPHRASE`:
 >
 > ```sh
 > # Linux / macOS
-> export XSGR_PASSPHRASE='your-passphrase'
+> export HMDL_PASSPHRASE='your-passphrase'
 >
 > # Windows PowerShell
-> $env:XSGR_PASSPHRASE = 'your-passphrase'
+> $env:HMDL_PASSPHRASE = 'your-passphrase'
 > ```
 
 ## Step 4 — Build a real executable (recommended)
@@ -76,18 +76,18 @@ loaded from disk) plus your passphrase.
 So you don't need the source code or `go run` every time:
 
 ```sh
-# Linux / macOS — produces ./xsgr
-go build -o xsgr .
+# Linux / macOS — produces ./hmdl
+go build -o hmdl .
 
-# Windows (PowerShell or Command Prompt) — produces xsgr.exe
-go build -o xsgr.exe .
+# Windows (PowerShell or Command Prompt) — produces hmdl.exe
+go build -o hmdl.exe .
 ```
 
 Now you can run it directly:
 
 ```sh
-./xsgr          # Linux / macOS
-.\xsgr.exe      # Windows
+./hmdl          # Linux / macOS
+.\hmdl.exe      # Windows
 ```
 
 The resulting file is fully self-contained — you can copy it to another
@@ -97,31 +97,31 @@ machine (or a USB stick) and it will just work.
 
 ```sh
 # Build a Windows exe from Linux/macOS (or vice versa)
-GOOS=windows GOARCH=amd64 go build -o xsgr.exe .
+GOOS=windows GOARCH=amd64 go build -o hmdl.exe .
 
 # Build a Linux binary from Windows/macOS
-GOOS=linux GOARCH=amd64 go build -o xsgr .
+GOOS=linux GOARCH=amd64 go build -o hmdl .
 ```
 
 ### Installing onto your PATH (optional)
 
 ```sh
-go install github.com/4ntyr/xessenger_cli@latest
+go install github.com/4ntyr/heimdall_cli@latest
 ```
 
-This puts a binary named `xessenger_cli` into your Go bin directory
+This puts a binary named `heimdall_cli` into your Go bin directory
 (usually `~/go/bin`). Make sure that directory is on your `PATH` —
 `go env GOBIN` or `go env GOPATH` tells you where it is.
 
 ## Step 5 — Chat with someone
 
-Both you and your friend run XSGR. One of you needs to know the other's
+Both you and your friend run HMDL. One of you needs to know the other's
 **IP address and port**.
 
 **Person A** (just listens; the default port is 7331):
 
 ```sh
-./xsgr
+./hmdl
 # Listening for peers on [::]:7331
 ```
 
@@ -132,7 +132,7 @@ the router must forward port 7331 to A's computer.)
 **Person B** connects:
 
 ```sh
-./xsgr -connect 203.0.113.10:7331
+./hmdl -connect 203.0.113.10:7331
 ```
 
 Both sides should now print `*** <name> connected`. Type a message and
@@ -154,21 +154,21 @@ press Enter — it's sent to everyone you're connected to.
 
 Encryption is always on, but to be sure you're talking to the right
 person, compare **fingerprints** out-of-band (phone call, in person —
-not over XSGR itself). Each side's fingerprint is printed at startup and
+not over HMDL itself). Each side's fingerprint is printed at startup and
 in `/peers`. If they match, both sides run:
 
 ```
 /verify <name>
 ```
 
-If a peer's key ever changes unexpectedly, XSGR shows a prominent
+If a peer's key ever changes unexpectedly, HMDL shows a prominent
 `SECURITY WARNING` and marks the connection `UNTRUSTED` — never ignore
 it. See `docs/threat-model.md` for details.
 
 ## All command-line flags
 
 ```
-xsgr -h
+hmdl -h
 ```
 
 | Flag | Default | Meaning |
@@ -176,21 +176,21 @@ xsgr -h
 | `-name` | — | display name, **required on first run** only |
 | `-listen` | `:7331` | address/port to listen on |
 | `-connect` | — | peer to connect to on startup |
-| `-data` | `~/.xessenger` | where the identity file and trust store live |
+| `-data` | `~/.heimdall` | where the identity file and trust store live |
 
 ## Troubleshooting
 
 - **`go: command not found`** — Go isn't installed or your terminal was
   open before installation. Reopen the terminal or reboot.
 - **First run asks for `-name`** — you already have an identity, or you
-  forgot it: `./xsgr -name yourname` once; afterwards just `./xsgr`.
+  forgot it: `./hmdl -name yourname` once; afterwards just `./hmdl`.
 - **"wrong passphrase or corrupted identity file"** — the passphrase you
   entered doesn't match the one you chose on first run.
 - **Friend can't connect** — check the firewall allows inbound
   connections on the listen port (default 7331), and that you're giving
   out the right IP. Over the internet, the listener's router needs a
   port-forward for 7331.
-- **`address already in use`** — another XSGR instance is already running
+- **`address already in use`** — another HMDL instance is already running
   on that port; close it or pick another with `-listen :7332`.
 
 ## Avoiding router port-forwarding
@@ -199,7 +199,7 @@ Today, direct internet connections assume one side can accept an inbound
 TCP connection on the listen port. That usually means a router
 port-forward.
 
-The good news is that XSGR's layers are already separated cleanly:
+The good news is that HMDL's layers are already separated cleanly:
 
 - `internal/proto` does not depend on sockets and can run over any
   reliable, ordered, opaque byte stream;
@@ -218,20 +218,20 @@ Technique:
 
 An overlay network installs a virtual network interface on each device
 and creates an encrypted mesh or hub-and-spoke network between members.
-From XSGR's point of view, this usually looks like a normal private IP
+From HMDL's point of view, this usually looks like a normal private IP
 network: each peer gets an address on the overlay, and `/connect` uses
 that address exactly like a LAN address.
 
 This avoids manual router configuration because the overlay software
 handles peer discovery, NAT traversal, relay fallback, or coordination
-itself. XSGR does not need to know which of those mechanisms the overlay
+itself. HMDL does not need to know which of those mechanisms the overlay
 used; it only sees a working TCP path.
 
 How it helps in practice:
 
 - both users join the same overlay;
 - each side gets a reachable private address;
-- XSGR keeps using normal `/connect <addr>` over that overlay.
+- HMDL keeps using normal `/connect <addr>` over that overlay.
 
 Work needed in this repository: **very low**.
 
@@ -247,7 +247,7 @@ Tradeoffs:
 
 - easiest path for users today;
 - depends on third-party networking software;
-- not a built-in XSGR feature.
+- not a built-in HMDL feature.
 
 ### Option 2 — Add a relay / rendezvous server (best built-in option)
 
@@ -261,7 +261,7 @@ either:
 - only introduce the peers and help them establish a direct session; or
 - stay in the data path and relay encrypted frames between them.
 
-For XSGR, the second form is the most straightforward first step. The
+For HMDL, the second form is the most straightforward first step. The
 existing handshake can still run end-to-end between peers, while the
 relay forwards opaque frames without access to the message plaintext.
 
@@ -314,7 +314,7 @@ time so their NAT devices create matching temporary mappings.
 
 In practice, this is usually done with UDP, not raw TCP, because UDP
 hole punching is far more widely supported by consumer NATs. That is an
-important fit issue for XSGR: the protocol expects a reliable, ordered,
+important fit issue for HMDL: the protocol expects a reliable, ordered,
 opaque byte stream, so a UDP path would need an adaptation layer that
 provides stream-like reliability/ordering semantics, or the project
 would need to adopt an equivalent transport such as QUIC.
@@ -415,7 +415,7 @@ Implementation plan:
 
 1. Add router discovery and mapping support for one or more of UPnP,
    NAT-PMP, or PCP.
-2. Request and renew a mapping for the listen port while XSGR is
+2. Request and renew a mapping for the listen port while HMDL is
    running, then release it on shutdown when possible.
 3. Surface mapping success, failure, lease duration, and discovered
    external address clearly in the CLI.
@@ -435,7 +435,7 @@ Tradeoffs:
 If the goal is "no manual router configuration" with the least product
 work, use an overlay network as the immediate answer and document it.
 
-If the goal is a built-in solution inside XSGR, a relay/rendezvous mode
+If the goal is a built-in solution inside HMDL, a relay/rendezvous mode
 is the most practical next step. It gives the highest success rate with
 the fewest protocol changes because the existing end-to-end handshake and
 session encryption can remain unchanged.

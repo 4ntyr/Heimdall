@@ -20,7 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	xcrypto "github.com/4ntyr/xessenger_cli/internal/crypto"
+	xcrypto "github.com/4ntyr/heimdall_cli/internal/crypto"
 )
 
 // identityFileVersion is the version byte of the on-disk identity format.
@@ -210,7 +210,7 @@ func Load(path, passphrase string) (*Identity, error) {
 // identityAAD binds the encrypted identity blob to its file name so a blob
 // cannot be silently swapped between differently-named identities.
 func identityAAD(path string) []byte {
-	return []byte("xessenger identity v1 " + filepath.Base(path))
+	return []byte("heimdall identity v1 " + filepath.Base(path))
 }
 
 // writeIdentityFile serialises version || saltLen || salt || blob atomically
