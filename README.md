@@ -10,7 +10,9 @@ identity fingerprints (Ed25519), never by display name.
 
 - **No servers, no accounts, no metadata collection.** Messages travel
   directly between peers over TCP; there is no central infrastructure to
-  trust, shut down, or compel.
+  trust, shut down, or compel. An optional, self-hosted relay exists for
+  peers who cannot reach each other directly — it sees only ciphertext, and
+  Heimdall contacts none unless you ask it to.
 - **Real end-to-end encryption.** A Noise-style authenticated handshake
   (X25519 + Ed25519-signed transcripts), AES-256-GCM for every message, a
   per-message symmetric ratchet for forward secrecy, and periodic key
@@ -48,6 +50,14 @@ identity fingerprints (Ed25519), never by display name.
   (PBKDF2-SHA-256, 600k iterations + AES-256-GCM, file mode 0600).
 - **Robust sessions** — keepalive (ping/pong), clean disconnects, automatic
   reconnect with a fresh handshake, and per-peer send queues.
+- **Works behind NATs and firewalls** — invite codes (`/invite`, `/join`)
+  connect two peers with no port forwarding and no listening port at all.
+  Heimdall races a direct connection, a TCP hole punch and a relayed circuit,
+  and keeps whichever works. The relay speaks real TLS and a real WebSocket
+  upgrade on port 443, so it survives restrictive networks, mandatory HTTP
+  proxies and TLS-intercepting corporate proxies. First contact through an
+  invite code is authenticated end-to-end, so the relay cannot impersonate
+  either peer.
 - **Cross-platform** — builds for Windows and Linux (and anything else Go
   targets) with `go build`; no CGO, no third-party modules.
 
@@ -67,7 +77,7 @@ go build -o hmdl .
 ./hmdl
 ```
 
-Chat with a friend (one side listens, the other connects):
+Chat with a friend on the same network (one side listens, the other connects):
 
 ```sh
 # Peer A (listener, default port 7331)
@@ -75,6 +85,24 @@ Chat with a friend (one side listens, the other connects):
 
 # Peer B
 ./hmdl -connect <A's IP>:7331
+```
+
+Across the internet, with no port forwarding on either side, use a relay and
+an invite code:
+
+```sh
+# Both peers (relay.example.com is a relay you or your friend runs)
+./hmdl -relay relay.example.com
+
+# Peer A types:   /invite      → prints a code to send to B
+# Peer B types:   /join <code> → connected
+```
+
+To run a relay of your own:
+
+```sh
+go build -o hmdl-relay ./cmd/hmdl-relay
+sudo ./hmdl-relay      # listens on :443, self-signs a certificate
 ```
 
 Both sides should compare the identity fingerprints printed at startup
@@ -87,6 +115,7 @@ flags, cross-compilation, and troubleshooting.
 | Document | Contents |
 |---|---|
 | [docs/protocol.md](docs/protocol.md) | Full wire-protocol specification (handshake, key derivation, ratchet, framing) — written *before* the implementation |
+| [docs/rendezvous.md](docs/rendezvous.md) | NAT traversal: invite codes, the relay protocol, hole punching, and how a relay connection gets through restrictive networks |
 | [docs/threat-model.md](docs/threat-model.md) | What Heimdall protects against — and what it explicitly does not |
 | [docs/architecture.md](docs/architecture.md) | Layered design, package responsibilities, security properties |
 | [docs/deployment.md](docs/deployment.md) | Build, install and usage guide for non-Go users |
@@ -98,22 +127,25 @@ The cryptographic protocol and the network layer are deliberately decoupled
 (`internal/proto` knows nothing about sockets), so connectivity improvements
 can be added without touching the end-to-end encryption.
 
-Planned, roughly in priority order (see
-[dev-logs/networking.md](dev-logs/networking.md) for the full analysis):
+**Done** (see [docs/rendezvous.md](docs/rendezvous.md)):
 
-1. **Relay / rendezvous mode** — optional public meeting point so peers
-   behind NATs can connect without manual port-forwarding; the relay only
-   forwards opaque encrypted frames and never sees plaintext. *This is the
-   primary next milestone.*
-2. **IPv6-first direct connections** — polished support and documentation
-   for peers with globally routable IPv6.
+1. ~~**Relay / rendezvous mode**~~ — `hmdl-relay`, plus `/invite` and `/join`
+   invite codes. The relay forwards opaque encrypted frames, never sees
+   plaintext, never learns an identity, and cannot impersonate a peer.
+2. ~~**IPv6-first direct connections**~~ — peers advertise their own
+   addresses and a direct path is always raced first, so two peers with
+   working IPv6 or on one LAN never touch a relay.
+4. ~~**NAT hole punching**~~ — TCP simultaneous open, coordinated by the
+   rendezvous, with relay fallback when a NAT will not cooperate.
+
+Still planned:
+
 3. **Automatic port mapping** — UPnP / NAT-PMP / PCP support to automate
    router port-forwarding where available.
-4. **NAT hole punching** — true serverless connectivity through NATs,
-   paired with relay fallback (the largest, longest-term effort).
 
-Explicit non-goals for v1: anonymous routing, traffic-analysis resistance,
-offline message queueing, and group chats.
+Explicit non-goals: anonymous routing, traffic-analysis resistance, offline
+message queueing, group chats, and migrating a live session from the relay to
+a direct path mid-conversation.
 
 ## Security
 

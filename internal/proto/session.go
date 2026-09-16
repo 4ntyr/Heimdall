@@ -22,6 +22,11 @@ const (
 	infoMsg     = "heimdall v1 msg"
 	infoRotate  = "heimdall v1 rotate"
 	infoSession = "heimdall v1 session id"
+
+	// infoPairConfirm keys the rendezvous pairing confirmation, which is
+	// derived from the invite code's pairing key rather than the session
+	// secret (docs/rendezvous.md §4).
+	infoPairConfirm = "heimdall v1 pairing confirm"
 )
 
 // rotationInterval is the number of sent messages after which the session

@@ -138,10 +138,67 @@ the router must forward port 7331 to A's computer.)
 Both sides should now print `*** <name> connected`. Type a message and
 press Enter — it's sent to everyone you're connected to.
 
+## Step 6 — Chat without port forwarding (invite codes)
+
+Step 5 needs one side to be directly reachable, which usually means
+configuring your router. You can skip all of that with a **relay**.
+
+A relay introduces two people who each connect *outward* to it — something
+almost every network allows — and forwards encrypted frames between them when
+they cannot reach each other directly. It never sees your messages, your name
+or your identity key, and it cannot impersonate either of you. See
+`docs/rendezvous.md` §9 for exactly what it does and does not learn.
+
+You need a relay you or your friend runs (see "Running your own relay" below);
+Heimdall ships no relay address and contacts none unless you ask it to.
+
+**Person A:**
+
+```sh
+./hmdl -relay relay.example.com
+# Relay relay.example.com reachable over tls; /invite and /join are available
+```
+
+Then type `/invite`:
+
+```
+/invite
+Give this code to your peer; it is valid for five minutes:
+
+    K7QM-2R4T-9XJD-BW5N-HC3P-8YFA-6ZE2-VS4K
+
+Send it over a channel you trust — anyone who has it can answer it.
+```
+
+**Person B** runs the same command and joins:
+
+```sh
+./hmdl -relay relay.example.com
+```
+
+```
+/join K7QM-2R4T-9XJD-BW5N-HC3P-8YFA-6ZE2-VS4K
+```
+
+Both sides print `*** <name> connected`. `/peers` shows how the connection was
+made: `DIRECT` (straight to each other), `PUNCHED` (through both NATs), or
+`RELAY` (via the relay). Heimdall tries all three at once and keeps the best
+one, so a relay is used only when it is actually needed.
+
+Neither side needs a listening port at all. If you want to be certain nothing
+is listening, run with `-listen ""`.
+
+**Send the code over a channel you trust.** Anyone who has the code within its
+five-minute life can answer it, and they would then appear as a normal
+unverified peer. Verify fingerprints afterwards as in Step 5 — a relay cannot
+fake them.
+
 ### Commands you can type
 
 | Command | What it does |
 |---|---|
+| `/invite` | publish an invite code for a peer to join with (needs `-relay`) |
+| `/join <code>` | connect to whoever published an invite code (needs `-relay`) |
 | `/connect <addr>` | connect to another peer, e.g. `/connect 192.168.1.5:7331` |
 | `/msg <name> <text>` | send a message to one specific peer |
 | `/all <text>` | broadcast to all connected peers (same as typing bare text) |
@@ -177,6 +234,58 @@ hmdl -h
 | `-listen` | `:7331` | address/port to listen on |
 | `-connect` | — | peer to connect to on startup |
 | `-data` | `~/.heimdall` | where the identity file and trust store live |
+| `-relay` | — | relay to use for `/invite` and `/join`, e.g. `relay.example.com` or `https://example.com/hmdl` |
+| `-relay-pin` | — | certificate pin for a self-signed relay (printed by `hmdl-relay` at startup) |
+| `-relay-verify` | off | refuse a relay certificate that cannot be verified, instead of tolerating interception |
+| `-proxy` | `$HTTPS_PROXY` | HTTP proxy to reach the relay through |
+
+Passing `-listen ""` disables the listener entirely. Everything still works
+through a relay, and nothing on your machine accepts inbound connections.
+
+## Running your own relay
+
+The relay is a second binary in the same repository:
+
+```sh
+go build -o hmdl-relay ./cmd/hmdl-relay
+sudo ./hmdl-relay
+```
+
+By default it listens on `:443` (TLS) and `:80` (cleartext fallback), serving
+at the path `/hmdl`. With no certificate supplied it generates a self-signed
+one and prints the pin your users need:
+
+```
+Relay listening on :443/hmdl (TLS)
+Self-signed certificate. Clients must pass:
+  -relay-pin 9mE2v0i…=
+```
+
+With a real certificate — from Let's Encrypt or anywhere else — no pin is
+needed:
+
+```sh
+./hmdl-relay -cert /etc/letsencrypt/live/example.com/fullchain.pem \
+             -key  /etc/letsencrypt/live/example.com/privkey.pem
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-addr` | `:443` | TLS listen address |
+| `-http` | `:80` | cleartext listen address; `""` disables it |
+| `-path` | `/hmdl` | URL path to serve at |
+| `-cert` / `-key` | — | TLS certificate and key (PEM); omit to self-sign |
+| `-quiet` | off | suppress connection logging |
+
+**Put it on port 443, behind a hostname you already use.** The relay speaks
+real TLS and a real WebSocket upgrade, so it is indistinguishable from ordinary
+HTTPS traffic, and it is an ordinary HTTP handler — you can serve it at a path
+on a domain that already hosts a website. On networks that only permit
+approved destinations, that is the difference between reachable and not.
+
+The relay keeps no persistent state and logs nothing sensitive. It is capped in
+every direction it can be pushed (code lifetimes, circuit counts, bandwidth,
+per-source rate limits); see `docs/rendezvous.md` §6.
 
 ## Troubleshooting
 
@@ -192,3 +301,13 @@ hmdl -h
   port-forward for 7331.
 - **`address already in use`** — another HMDL instance is already running
   on that port; close it or pick another with `-listen :7332`.
+- **Friend still can't connect, and you can't forward a port** — use a relay
+  and invite codes (Step 6). No port forwarding, no listening port, no router
+  configuration.
+- **`relay … unreachable`** — check the hostname, and that you passed
+  `-relay-pin` if the relay is self-signed. On a network with a mandatory
+  proxy, set `HTTPS_PROXY` or pass `-proxy`. Heimdall also tries port 80
+  automatically where 443 is blocked.
+- **`/invite` says no relay configured** — start HMDL with `-relay <host>`.
+- **`join failed: … no such invite code`** — the code was mistyped, already
+  used, or older than five minutes. Codes are single-use; ask for a new one.

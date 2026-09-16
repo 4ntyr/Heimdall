@@ -53,6 +53,10 @@ type HandshakeResult struct {
 	PeerKey ed25519.PublicKey
 	// PeerFingerprint is the SHA-256 fingerprint of PeerKey.
 	PeerFingerprint string
+	// Transcript is the handshake transcript hash both sides signed. It is
+	// public (not a secret) and is used to bind a pairing confirmation to
+	// this exact handshake (docs/rendezvous.md §4).
+	Transcript []byte
 }
 
 // Handshaker drives one side of the handshake. It is transport-agnostic:
@@ -177,12 +181,14 @@ func (h *Handshaker) handleAuthInitiator(msg []byte) ([]byte, *HandshakeResult, 
 	if err != nil {
 		return nil, nil, err
 	}
+	transcript := h.transcript
 	h.finish()
 	return msg3, &HandshakeResult{
 		Session:         sess,
 		PeerName:        name,
 		PeerKey:         pub,
 		PeerFingerprint: identity.FingerprintOf(pub),
+		Transcript:      append([]byte(nil), transcript...),
 	}, nil
 }
 
@@ -209,12 +215,14 @@ func (h *Handshaker) handleAuthResponder(msg []byte) ([]byte, *HandshakeResult, 
 	if err != nil {
 		return nil, nil, err
 	}
+	transcript := h.transcript
 	h.finish()
 	return nil, &HandshakeResult{
 		Session:         sess,
 		PeerName:        name,
 		PeerKey:         pub,
 		PeerFingerprint: identity.FingerprintOf(pub),
+		Transcript:      append([]byte(nil), transcript...),
 	}, nil
 }
 

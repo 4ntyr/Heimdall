@@ -40,8 +40,17 @@ CLI (main, repository root)
  ├── Secure Storage               internal/identity (identity file),
  │                                internal/peers (trust store file)
  │
+ ├── Connection Paths             internal/connect (races direct / punched /
+ │                                                 relayed paths)
+ │       └── Rendezvous             internal/rendezvous (invite codes, relay
+ │                                   control connection, WebSocket, ladder)
+ │
  └── Network Transport            internal/transport (TCP listener/dialer,
-                                                      length-prefixed frames)
+                                   length-prefixed frames, reuse-port sockets,
+                                   hole punching)
+
+Separate binary:
+ hmdl-relay (cmd/hmdl-relay)      internal/relay (rendezvous + byte relay)
 ```
 
 Dependency direction is strictly top-down. Notable rules:
@@ -65,6 +74,9 @@ Dependency direction is strictly top-down. Notable rules:
 | `internal/proto` | Wire format, authenticated handshake (X25519 + Ed25519-signed transcript), session ratchet, replay protection, key rotation | sockets, terminal |
 | `internal/transport` | TCP listen/dial, length-prefixed framed messages, I/O deadlines | protocol semantics |
 | `internal/session` | Connection lifecycle: inbound/outbound, handshake driving, keepalive, disconnect detection, automatic reconnect, per-peer send queues | rendering |
+| `internal/rendezvous` | Invite codes and their key derivation, relay control protocol, RFC 6455 WebSocket framing, HTTP CONNECT proxying, the TLS/proxy/cleartext connection ladder | peer sessions, cryptographic protocol |
+| `internal/connect` | Racing direct, hole-punched and relayed paths to an authenticated session; tracking rendezvous in flight | wire formats |
+| `internal/relay` | The relay server: pairing peers on a rendezvous id, issuing circuit tickets, splicing opaque bytes, abuse limits | anything about identities or plaintext |
 | `main` (repository root) | CLI wiring: flags, REPL, event printing | logic |
 
 ## Security properties (summary)
@@ -82,5 +94,11 @@ Dependency direction is strictly top-down. Notable rules:
 - **MITM / impersonation protection:** peers are identified by the SHA-256
   fingerprint of their Ed25519 public key, never by their display name;
   unexpected key changes are flagged `UNTRUSTED` with a prominent warning.
+
+**Connectivity is independent of all of this.** `internal/proto` consumes
+opaque byte slices and `transport.NewFrameIO` accepts any `net.Conn`, so a
+relayed or hole-punched connection terminates in the same handshake as a direct
+one. Adding NAT traversal required no change to the cryptographic protocol; see
+`docs/rendezvous.md`.
 
 See `docs/threat-model.md` for what is and is not protected.

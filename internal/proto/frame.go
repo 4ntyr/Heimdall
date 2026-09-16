@@ -27,6 +27,10 @@ const (
 	TypePing  byte = 2
 	TypePong  byte = 3
 	TypeClose byte = 4
+	// TypePairConfirm proves knowledge of an invite code's pairing key,
+	// binding a rendezvous-established session to that code
+	// (docs/rendezvous.md §4).
+	TypePairConfirm byte = 5
 )
 
 const (
@@ -85,7 +89,7 @@ func parseFrame(buf []byte) (*frame, error) {
 		return nil, fmt.Errorf("%w: bad version %d", ErrMalformed, buf[0])
 	}
 	switch buf[1] {
-	case TypeChat, TypePing, TypePong, TypeClose:
+	case TypeChat, TypePing, TypePong, TypeClose, TypePairConfirm:
 	default:
 		return nil, fmt.Errorf("%w: bad type %d", ErrMalformed, buf[1])
 	}
