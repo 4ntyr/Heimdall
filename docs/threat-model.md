@@ -45,9 +45,45 @@ We assume an adversary who can:
 | Message ordering manipulation | Sequence-number window detects gaps/out-of-order delivery beyond the window; too-old messages rejected |
 | Session hijacking | An attacker who did not complete the signed handshake has no session keys; injected packets fail AEAD authentication |
 | Compromised network infrastructure | All security is end-to-end between the two endpoints; relays/routers see only ciphertext |
+| Malicious relay operator | A relay forwards opaque frames. It cannot read messages, learn either peer's identity key, name or fingerprint, or man-in-the-middle a session — it can only relay the signed handshake unmodified. It cannot impersonate a peer on first contact either, because an invite code is confirmed end-to-end (`docs/rendezvous.md` §4) |
+| TLS-intercepting proxy on the path to a relay | Nothing to gain: relay TLS is not a security boundary, and the session inside it is already end-to-end encrypted and authenticated |
 | Compromised/untrusted peers | Unverified peers are displayed as `SECURE / UNVERIFIED`; peers whose key changed are `UNTRUSTED` and their traffic is surfaced with warnings; users can `/disconnect` them |
 | Compromised long-term identity keys | Forward secrecy: sessions are keyed by ephemeral X25519 and advanced by a symmetric ratchet; stealing an identity key does not decrypt previously captured sessions (but does allow future impersonation — hence fingerprint verification) |
 | Local key theft (offline) | Identity file encrypted with PBKDF2-SHA-256 (600k iterations) + AES-256-GCM with a random per-file salt; file permissions 0600 |
+
+## The relay: what it costs you
+
+Using a rendezvous relay is optional and off by default. When it is used, it is
+a **metadata position** — the one real cost of the feature, stated plainly:
+
+| The relay learns | The relay does not learn |
+|---|---|
+| That two IP addresses were connected, and when | Either peer's identity key, fingerprint or display name |
+| A random, single-use rendezvous id, unlinkable to any identity | The invite code or the pairing key derived from it |
+| How many bytes flowed, and when | Any plaintext, or either peer's candidate addresses |
+
+This is roughly what any on-path observer already sees, concentrated in one
+place. Run your own relay if that concentration matters to you; Heimdall ships
+no relay address and contacts none unless you pass `-relay`.
+
+### Why relay certificates are deliberately not trusted
+
+Heimdall accepts a relay TLS certificate it cannot verify, and falls back to a
+cleartext rung if 443 is blocked. This is a deliberate design decision, not an
+oversight, and it must not be "fixed" by adding certificate pinning.
+
+The relay is an untrusted byte pipe by construction: confidentiality,
+integrity and authentication are all end-to-end, and first contact through an
+invite code is confirmed with a channel binding the relay cannot forge. There
+is therefore nothing for a relay certificate to protect. What the tolerance
+buys is real: Heimdall keeps working on networks with an intercepting
+corporate proxy, where applications that pin certificates simply fail.
+
+Users who would rather fail than tolerate interception can pass
+`-relay-verify`; users running a self-signed relay can pass `-relay-pin`.
+
+If the pairing confirmation of `docs/rendezvous.md` §4 is ever weakened or made
+optional, this tolerance must be removed at the same time. The two are a pair.
 
 ## Not protected against
 
@@ -65,7 +101,12 @@ Heimdall cannot protect against:
   running (session keys are in memory).
 - **Traffic analysis.** An observer can see *that* two IP addresses communicate,
   connection timing and approximate message sizes. No padding/mixing is
-  provided.
+  provided. A relay, when used, sees the same for the pair it is relaying.
+- **A network that blocks the relay outright.** A network permitting only a
+  whitelist of destinations can still block an unknown relay host. Hosting the
+  relay on a domain the network already permits is an operational answer, not
+  a protocol one. Resistance to active probing of a relay endpoint is not
+  attempted.
 - **Denial of service.** An attacker can drop packets or exhaust resources;
   availability is not guaranteed.
 - **Endpoint display-name confusion.** Two peers may pick the same name; the
@@ -78,3 +119,7 @@ Debug logging must never include private keys, session keys, plaintext
 cryptographic secrets, or authentication credentials (passphrases). Logging is
 safe by default: only non-secret metadata (connection events, peer names,
 fingerprints, errors) may be logged.
+
+The relay holds itself to the same rule and one more: it never logs rendezvous
+ids, circuit tickets, invite codes or payload bytes, and keeps no persistent
+state.

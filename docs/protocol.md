@@ -154,9 +154,10 @@ shown.
 | 2 | `TypePing` | Keepalive / liveness probe |
 | 3 | `TypePong` | Keepalive response |
 | 4 | `TypeClose` | Clean session termination |
+| 5 | `TypePairConfirm` | Proof of holding an invite code (`docs/rendezvous.md` §4) |
 
-`Ping/Pong/Close` participate in the same ratchet and replay window as chat
-messages, so control traffic cannot be replayed or injected either.
+`Ping/Pong/Close/PairConfirm` participate in the same ratchet and replay window
+as chat messages, so control traffic cannot be replayed or injected either.
 
 ## 8. Replay protection, ordering, and key rotation
 
@@ -237,9 +238,25 @@ nothing about cryptography or the UI; the protocol knows nothing about sockets.
 | Identity key changed | Mark UNTRUSTED, warn user, keep old record until user acts |
 | Timeout | Close connection; session manager may reconnect with a fresh handshake |
 
-## 12. Explicit non-goals
+## 12. Relationship to NAT traversal
+
+NAT traversal is specified separately in `docs/rendezvous.md`: invite codes, a
+rendezvous/relay server, TCP hole punching, and the connection ladder that gets
+a relay connection through restrictive networks.
+
+That layer sits strictly **below** this one and does not modify it. A relay
+circuit carries exactly the §10 frames a direct TCP connection carries, and the
+relay sees only ciphertext — it is precisely the "attacker who can only relay
+the handshake unmodified" of §3.1.
+
+One addition touches this document: frame type 5, `TypePairConfirm` (§7). It
+carries `HKDF(pairingKey, salt=h, info="heimdall v1 pairing confirm")`, where
+`pairingKey` comes from an invite code and `h` is the §3 transcript hash. It
+authenticates *first contact* over an untrusted relay, and is mandatory
+whenever the local side used an invite code. It changes neither the handshake
+nor the session keys; see `docs/rendezvous.md` §4.
+
+## 13. Explicit non-goals
 
 No padding/traffic-analysis resistance, no anonymous routing, no offline
-message queueing, no group chats, no NAT traversal in v1 (the networking layer
-is deliberately separated so hole-punching/relays can be added without touching
-the cryptographic protocol).
+message queueing, no group chats.

@@ -61,8 +61,18 @@ func (f *FrameIO) Send(payload []byte) error {
 // Recv reads one length-prefixed frame. It returns ErrFrameTooLarge when the
 // peer announces an oversized frame (the connection should then be dropped).
 func (f *FrameIO) Recv() ([]byte, error) {
+	return f.RecvBefore(time.Now().Add(IOTimeout))
+}
+
+// RecvBefore reads one frame, requiring it to arrive by deadline.
+//
+// Recv applies its own IOTimeout to each read, which would otherwise override
+// any deadline the caller had set on the connection. A caller that needs a
+// specific bound — waiting for a pairing confirmation, say — must pass it
+// here rather than calling SetDeadline and hoping it survives.
+func (f *FrameIO) RecvBefore(deadline time.Time) ([]byte, error) {
 	var hdr [4]byte
-	_ = f.conn.SetReadDeadline(time.Now().Add(IOTimeout))
+	_ = f.conn.SetReadDeadline(deadline)
 	if _, err := io.ReadFull(f.conn, hdr[:]); err != nil {
 		return nil, err
 	}
@@ -74,7 +84,7 @@ func (f *FrameIO) Recv() ([]byte, error) {
 	if n == 0 {
 		return payload, nil
 	}
-	_ = f.conn.SetReadDeadline(time.Now().Add(IOTimeout))
+	_ = f.conn.SetReadDeadline(deadline)
 	if _, err := io.ReadFull(f.conn, payload); err != nil {
 		return nil, err
 	}
@@ -115,6 +125,16 @@ func Listen(addr string) (*Listener, error) {
 
 // Accept returns the next inbound connection as a FrameIO.
 func (l *Listener) Accept() (*FrameIO, error) {
+	conn, err := l.AcceptConn()
+	if err != nil {
+		return nil, err
+	}
+	return NewFrameIO(conn), nil
+}
+
+// AcceptConn returns the next inbound connection unwrapped, for callers that
+// need to inspect the peer address before deciding how to handle it.
+func (l *Listener) AcceptConn() (net.Conn, error) {
 	conn, err := l.ln.Accept()
 	if err != nil {
 		return nil, err
@@ -122,7 +142,7 @@ func (l *Listener) Accept() (*FrameIO, error) {
 	if tc, ok := conn.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
 	}
-	return NewFrameIO(conn), nil
+	return conn, nil
 }
 
 // Addr returns the listener's bound address (useful when port 0 was given).
