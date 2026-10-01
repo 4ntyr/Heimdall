@@ -41,6 +41,13 @@ type FrameIO struct {
 func NewFrameIO(conn net.Conn) *FrameIO { return &FrameIO{conn: conn} }
 
 // Send writes one length-prefixed frame.
+//
+// The length and the payload go out in a single write. Writing them separately
+// would be wrong as well as slow: sockets here set TCP_NODELAY, so a 4-byte
+// header becomes a packet of its own — doubling the packet count for a stream
+// of small frames — and a partial write of either part would desynchronise the
+// stream for every frame after it. net.Buffers uses writev where the platform
+// has it and retries correctly on a short write everywhere else.
 func (f *FrameIO) Send(payload []byte) error {
 	if len(payload) > MaxFrameSize {
 		return ErrFrameTooLarge
@@ -48,13 +55,12 @@ func (f *FrameIO) Send(payload []byte) error {
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(payload)))
 	_ = f.conn.SetWriteDeadline(time.Now().Add(IOTimeout))
-	if _, err := f.conn.Write(hdr[:]); err != nil {
-		return err
+	// WriteTo consumes the slice it is given, so build it per call.
+	bufs := net.Buffers{hdr[:]}
+	if len(payload) > 0 {
+		bufs = append(bufs, payload)
 	}
-	if len(payload) == 0 {
-		return nil
-	}
-	_, err := f.conn.Write(payload)
+	_, err := bufs.WriteTo(f.conn)
 	return err
 }
 
