@@ -31,6 +31,8 @@ CLI (main, repository root)
  │       └── Trust Store          internal/peers    (known keys, verification)
  │
  ├── Session Manager              internal/session + internal/proto.Session
+ │       └── File Transfers      internal/transfer (chunking, reassembly,
+ │                                filename safety, local limits)
  │
  ├── Authentication / Identity    internal/identity (Ed25519 keys, fingerprints)
  │
@@ -60,6 +62,11 @@ Dependency direction is strictly top-down. Notable rules:
   CLI or the network**.
 - `internal/transport` moves opaque bytes only. It has **no knowledge of
   terminal rendering or cryptography**.
+- `internal/transfer` imports `internal/proto` and the standard library. It
+  reaches the network only through an interface it declares and
+  `internal/session` implements, and it reports progress back the same way —
+  so it has **no knowledge of sockets or of the terminal**, and it is testable
+  with neither.
 - The `main` package talks to `internal/session` through a small
   channel-based event interface, so session logic is fully testable
   headlessly.
@@ -74,6 +81,7 @@ Dependency direction is strictly top-down. Notable rules:
 | `internal/proto` | Wire format, authenticated handshake (X25519 + Ed25519-signed transcript), session ratchet, replay protection, key rotation | sockets, terminal |
 | `internal/transport` | TCP listen/dial, length-prefixed framed messages, I/O deadlines | protocol semantics |
 | `internal/session` | Connection lifecycle: inbound/outbound, handshake driving, keepalive, disconnect detection, automatic reconnect, per-peer send queues | rendering |
+| `internal/transfer` | File transfers over an established session: chunking and reassembly, incremental digests, filename sanitisation, download paths, size/count/stall limits | sockets, frame encryption, rendering |
 | `internal/rendezvous` | Invite codes and their key derivation, relay control protocol, RFC 6455 WebSocket framing, HTTP CONNECT proxying, the TLS/proxy/cleartext connection ladder | peer sessions, cryptographic protocol |
 | `internal/connect` | Racing direct, hole-punched and relayed paths to an authenticated session; tracking rendezvous in flight | wire formats |
 | `internal/relay` | The relay server: pairing peers on a rendezvous id, issuing circuit tickets, splicing opaque bytes, abuse limits | anything about identities or plaintext |

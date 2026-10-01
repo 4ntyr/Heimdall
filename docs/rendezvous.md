@@ -307,6 +307,20 @@ Exceeding a limit yields `error{reason}` and a close. The relay keeps no
 persistent state and writes no logs containing rendezvous IDs, tickets or
 payload.
 
+**The byte limit is cumulative, and chat alone never reaches it.** A circuit is
+closed once 256 MiB has crossed it in one direction, counted over the circuit's
+whole life and never reset. Since a live session is never migrated from the
+relay to a direct path (§8.1), there is no recovery: the peers simply see a
+disconnect. File transfer (`docs/protocol.md` §13) is the first feature able to
+spend that budget, so a sender on a relayed path accounts for the bytes it has
+already sent, refuses an offer that would not fit, and says why — rather than
+letting the relay close the circuit mid-file with no explanation. Frame overhead
+makes the usable figure slightly lower than 256 MiB: a full 4080-byte chunk
+costs 4134 bytes on the wire once framing, header, nonce and tag are counted.
+
+A self-hosted relay may of course be configured differently; the client's
+accounting tracks the default and is not told the real figure.
+
 ## 7. Hole punching (opportunistic)
 
 Both peers bind their punch listener to the **same local port** they used for
