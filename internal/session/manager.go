@@ -107,7 +107,7 @@ type conn struct {
 	sess  *proto.Session
 	trust peers.TrustLevel
 	addr  string
-	send  chan []byte
+	send  chan outFrame
 	done  chan struct{}
 	once  sync.Once
 
@@ -379,7 +379,7 @@ func (m *Manager) runHandshake(fio *transport.FrameIO, opts AdoptOptions) error 
 		sess:  res.Session,
 		trust: trust,
 		addr:  fio.RemoteAddr(),
-		send:  make(chan []byte, 64),
+		send:  make(chan outFrame, 64),
 		done:  make(chan struct{}),
 		path:  path,
 	}
@@ -589,14 +589,37 @@ func (m *Manager) keepaliveLoop(c *conn) {
 	}
 }
 
-// writeLoop serializes outbound frames for one peer.
+// outFrame is a frame queued for sending but not yet sealed.
+//
+// Sealing happens in writeLoop rather than at enqueue time so that the
+// sequence number and rotation epoch a frame carries are assigned in the order
+// the frames actually reach the wire. The queue therefore holds plaintext, and
+// a payload must not be modified after it is enqueued — writeLoop reads it
+// later, from another goroutine. Sharing one immutable payload across several
+// peers is fine; mutating one is not.
+type outFrame struct {
+	typ     byte
+	payload []byte
+}
+
+// writeLoop serializes outbound frames for one peer. It is the only goroutine
+// that seals or writes for this connection, which is what makes sequence
+// numbers match wire order.
 func (m *Manager) writeLoop(c *conn) {
 	defer m.wg.Done()
 	for {
 		select {
 		case <-c.done:
 			return
-		case buf := <-c.send:
+		case f := <-c.send:
+			buf, err := c.sess.Seal(f.typ, f.payload)
+			if err != nil {
+				// Seal fails only on a closed session or an oversized
+				// payload. enqueue rejects the latter before queueing, so
+				// reaching here means the session is gone.
+				m.dropConn(c)
+				return
+			}
 			if err := c.io.Send(buf); err != nil {
 				m.dropConn(c)
 				return
@@ -605,14 +628,17 @@ func (m *Manager) writeLoop(c *conn) {
 	}
 }
 
-// enqueue seals and queues a frame for a peer.
+// enqueue queues a frame for a peer, to be sealed by its writeLoop.
+//
+// The size check stays here, synchronously, so an oversized payload is still
+// reported to the caller rather than discovered by writeLoop, where the only
+// available response would be to drop the connection.
 func (m *Manager) enqueue(c *conn, typ byte, payload []byte) error {
-	buf, err := c.sess.Seal(typ, payload)
-	if err != nil {
-		return err
+	if len(payload) > proto.MaxPlaintext {
+		return fmt.Errorf("proto: payload too large (%d > %d)", len(payload), proto.MaxPlaintext)
 	}
 	select {
-	case c.send <- buf:
+	case c.send <- outFrame{typ: typ, payload: payload}:
 		return nil
 	case <-c.done:
 		return errors.New("session: connection closed")
@@ -651,18 +677,11 @@ func (m *Manager) Send(name, text string) error {
 	if !ok {
 		return fmt.Errorf("session: not connected to %q", name)
 	}
-	buf, err := c.sess.SealChat(text)
+	payload, err := proto.EncodeChatPayload(text)
 	if err != nil {
 		return err
 	}
-	select {
-	case c.send <- buf:
-		return nil
-	case <-c.done:
-		return errors.New("session: connection closed")
-	default:
-		return errors.New("session: send queue full")
-	}
+	return m.enqueue(c, proto.TypeChat, payload)
 }
 
 // Broadcast delivers a chat message to every connected peer. Returns the
@@ -674,16 +693,16 @@ func (m *Manager) Broadcast(text string) int {
 		list = append(list, c)
 	}
 	m.mu.Unlock()
+	// Encoded once and shared: enqueue never mutates a payload, and each
+	// peer's writeLoop only reads it.
+	payload, err := proto.EncodeChatPayload(text)
+	if err != nil {
+		return 0
+	}
 	n := 0
 	for _, c := range list {
-		buf, err := c.sess.SealChat(text)
-		if err != nil {
-			continue
-		}
-		select {
-		case c.send <- buf:
+		if err := m.enqueue(c, proto.TypeChat, payload); err == nil {
 			n++
-		default:
 		}
 	}
 	return n

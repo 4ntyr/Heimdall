@@ -8,10 +8,13 @@ import (
 
 // File transfer payload codecs (docs/protocol.md §13.1).
 //
-// Each Seal helper mirrors SealChat: it encodes a payload and hands it to
-// Session.Seal, so a transfer is sequenced, replay-protected and rotated
-// exactly as chat is. The decoders are the inverse, operating on plaintext a
-// caller has already opened.
+// Each type has an Encode function and a Seal method. They are separate
+// because the two callers need different halves: a caller that sends one frame
+// and is done uses SealX, while the session's writer assigns sequence numbers
+// at write time and so needs the payload bytes without sealing them. All
+// validation lives in the encoders, so both paths enforce the same rules.
+//
+// The decoders are the inverse, operating on plaintext a caller has opened.
 
 const (
 	// Fixed field sizes, big-endian throughout.
@@ -49,8 +52,8 @@ type FileOffer struct {
 	Name string
 }
 
-// SealFileOffer seals an offer to send a file.
-func (s *Session) SealFileOffer(o FileOffer) ([]byte, error) {
+// EncodeFileOffer builds a TypeFileOffer payload.
+func EncodeFileOffer(o FileOffer) ([]byte, error) {
 	if len(o.Name) == 0 || len(o.Name) > MaxFileNameLen {
 		return nil, fmt.Errorf("proto: file name length %d out of range", len(o.Name))
 	}
@@ -61,7 +64,15 @@ func (s *Session) SealFileOffer(o FileOffer) ([]byte, error) {
 	b = binary.BigEndian.AppendUint64(b, o.ID)
 	b = binary.BigEndian.AppendUint64(b, o.Size)
 	b = binary.BigEndian.AppendUint16(b, uint16(len(o.Name)))
-	b = append(b, o.Name...)
+	return append(b, o.Name...), nil
+}
+
+// SealFileOffer seals an offer to send a file.
+func (s *Session) SealFileOffer(o FileOffer) ([]byte, error) {
+	b, err := EncodeFileOffer(o)
+	if err != nil {
+		return nil, err
+	}
 	return s.Seal(TypeFileOffer, b)
 }
 
@@ -89,14 +100,18 @@ func DecodeFileOffer(pt []byte) (FileOffer, error) {
 	}, nil
 }
 
-// SealFileAccept seals agreement to receive an offered file. startOffset is
-// where the receiver wants the data to begin; this version always sends 0
+// EncodeFileAccept builds a TypeFileAccept payload. startOffset is where the
+// receiver wants the data to begin; this version always sends 0
 // (docs/protocol.md §13.2).
-func (s *Session) SealFileAccept(id, startOffset uint64) ([]byte, error) {
+func EncodeFileAccept(id, startOffset uint64) []byte {
 	b := make([]byte, 0, transferIDSize+8)
 	b = binary.BigEndian.AppendUint64(b, id)
-	b = binary.BigEndian.AppendUint64(b, startOffset)
-	return s.Seal(TypeFileAccept, b)
+	return binary.BigEndian.AppendUint64(b, startOffset)
+}
+
+// SealFileAccept seals agreement to receive an offered file.
+func (s *Session) SealFileAccept(id, startOffset uint64) ([]byte, error) {
+	return s.Seal(TypeFileAccept, EncodeFileAccept(id, startOffset))
 }
 
 // DecodeFileAccept decodes an opened TypeFileAccept plaintext, returning the
@@ -108,11 +123,11 @@ func DecodeFileAccept(pt []byte) (id, startOffset uint64, err error) {
 	return binary.BigEndian.Uint64(pt[0:8]), binary.BigEndian.Uint64(pt[8:16]), nil
 }
 
-// SealFileChunk seals one slice of a file. offset is where data belongs in the
-// file; the receiver requires it to be exactly where it has reached, so it is
-// an assertion the receiver checks rather than a position it honours
+// EncodeFileChunk builds a TypeFileChunk payload. offset is where data belongs
+// in the file; the receiver requires it to be exactly where it has reached, so
+// it is an assertion the receiver checks rather than a position it honours
 // (docs/protocol.md §13.3).
-func (s *Session) SealFileChunk(id, offset uint64, data []byte) ([]byte, error) {
+func EncodeFileChunk(id, offset uint64, data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("proto: empty file chunk")
 	}
@@ -122,7 +137,15 @@ func (s *Session) SealFileChunk(id, offset uint64, data []byte) ([]byte, error) 
 	b := make([]byte, 0, fileChunkHeader+len(data))
 	b = binary.BigEndian.AppendUint64(b, id)
 	b = binary.BigEndian.AppendUint64(b, offset)
-	b = append(b, data...)
+	return append(b, data...), nil
+}
+
+// SealFileChunk seals one slice of a file.
+func (s *Session) SealFileChunk(id, offset uint64, data []byte) ([]byte, error) {
+	b, err := EncodeFileChunk(id, offset, data)
+	if err != nil {
+		return nil, err
+	}
 	return s.Seal(TypeFileChunk, b)
 }
 
@@ -130,7 +153,7 @@ func (s *Session) SealFileChunk(id, offset uint64, data []byte) ([]byte, error) 
 // aliases pt, which Session.Open allocated per frame and does not reuse.
 //
 // Unlike the other decoders this one cannot ignore trailing bytes, because for
-// a chunk every byte after the header *is* the data.
+// a chunk every byte after the header *is* the data (docs/protocol.md §13.4).
 func DecodeFileChunk(pt []byte) (id, offset uint64, data []byte, err error) {
 	if len(pt) <= fileChunkHeader {
 		return 0, 0, nil, fmt.Errorf("%w: file chunk carries no data", ErrMalformed)
@@ -142,15 +165,23 @@ func DecodeFileChunk(pt []byte) (id, offset uint64, data []byte, err error) {
 	return binary.BigEndian.Uint64(pt[0:8]), binary.BigEndian.Uint64(pt[8:16]), data, nil
 }
 
-// SealFileDone seals the end of a file together with the SHA-256 of what was
-// actually sent (docs/protocol.md §13.2).
-func (s *Session) SealFileDone(id uint64, digest []byte) ([]byte, error) {
+// EncodeFileDone builds a TypeFileDone payload: the end of a file together
+// with the SHA-256 of what was actually sent (docs/protocol.md §13.2).
+func EncodeFileDone(id uint64, digest []byte) ([]byte, error) {
 	if len(digest) != fileDigestSize {
 		return nil, fmt.Errorf("proto: file digest must be %d bytes, got %d", fileDigestSize, len(digest))
 	}
 	b := make([]byte, 0, transferIDSize+fileDigestSize)
 	b = binary.BigEndian.AppendUint64(b, id)
-	b = append(b, digest...)
+	return append(b, digest...), nil
+}
+
+// SealFileDone seals the end of a file and its digest.
+func (s *Session) SealFileDone(id uint64, digest []byte) ([]byte, error) {
+	b, err := EncodeFileDone(id, digest)
+	if err != nil {
+		return nil, err
+	}
 	return s.Seal(TypeFileDone, b)
 }
 
@@ -163,13 +194,17 @@ func DecodeFileDone(pt []byte) (id uint64, digest []byte, err error) {
 	return binary.BigEndian.Uint64(pt[0:8]), pt[8 : 8+fileDigestSize], nil
 }
 
+// EncodeFileCancel builds a TypeFileCancel payload.
+func EncodeFileCancel(id uint64, reason byte) []byte {
+	b := make([]byte, 0, transferIDSize+1)
+	b = binary.BigEndian.AppendUint64(b, id)
+	return append(b, reason)
+}
+
 // SealFileCancel seals abandonment of a transfer. Either side may send it at
 // any time, and it never ends the session.
 func (s *Session) SealFileCancel(id uint64, reason byte) ([]byte, error) {
-	b := make([]byte, 0, transferIDSize+1)
-	b = binary.BigEndian.AppendUint64(b, id)
-	b = append(b, reason)
-	return s.Seal(TypeFileCancel, b)
+	return s.Seal(TypeFileCancel, EncodeFileCancel(id, reason))
 }
 
 // DecodeFileCancel decodes an opened TypeFileCancel plaintext.
