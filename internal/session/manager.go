@@ -5,6 +5,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -108,6 +109,7 @@ type conn struct {
 	trust peers.TrustLevel
 	addr  string
 	send  chan outFrame
+	bulk  chan outFrame
 	done  chan struct{}
 	once  sync.Once
 
@@ -119,6 +121,20 @@ type conn struct {
 	// connection. An announced connection is never swapped out from under
 	// them; see settleDelay.
 	announced atomic.Bool
+
+	// lastWriteDone is when writeLoop last completed a write, as Unix
+	// nanoseconds. Keepalive reads it to tell "the peer is not answering"
+	// apart from "we have not managed to send anything yet"; see
+	// keepaliveLoop.
+	lastWriteDone atomic.Int64
+	// busy counts file transfers currently running on this connection.
+	// preferNew consults it so a transfer is not torn down by a duplicate
+	// connection arriving mid-file.
+	busy atomic.Int32
+	// bytesSent totals what this connection has written at the framing
+	// layer, which is what a relay counts against its circuit budget
+	// (docs/rendezvous.md §6).
+	bytesSent atomic.Int64
 }
 
 // NewManager creates a Manager bound to an identity and trust store.
@@ -380,6 +396,7 @@ func (m *Manager) runHandshake(fio *transport.FrameIO, opts AdoptOptions) error 
 		trust: trust,
 		addr:  fio.RemoteAddr(),
 		send:  make(chan outFrame, 64),
+		bulk:  make(chan outFrame, bulkQueueDepth),
 		done:  make(chan struct{}),
 		path:  path,
 	}
@@ -507,6 +524,21 @@ func (m *Manager) register(c *conn) bool {
 // A connection that has stopped answering keepalives is replaceable outright,
 // so a peer reconnecting over a black-holed path is never refused.
 func preferNew(old, new *conn) bool {
+	// A connection carrying a file transfer is not swapped out for a
+	// duplicate path.
+	//
+	// The unanswered test below is deliberately generous — one tick with no
+	// pong yet is enough to make a connection replaceable — because for chat
+	// a swap costs nothing. For a transfer it costs the whole file: there is
+	// no resume, so the transfer dies with the socket. Since keepaliveLoop
+	// raises unanswered on every tick and only clears it when the pong
+	// arrives, a long transfer would otherwise spend a slice of every
+	// keepaliveInterval replaceable by any inbound handshake. Hold on until
+	// the connection is properly unresponsive, at which point the transfer is
+	// lost regardless.
+	if old.busy.Load() > 0 && old.unanswered.Load() <= keepaliveMisses {
+		return false
+	}
 	if old.unanswered.Load() > 0 {
 		return true
 	}
@@ -572,21 +604,52 @@ func (m *Manager) keepaliveLoop(c *conn) {
 	defer m.wg.Done()
 	t := time.NewTicker(keepaliveInterval)
 	defer t.Stop()
+	// pingQueuedAt is when the outstanding ping was handed to the queue, zero
+	// before the first one.
+	var pingQueuedAt time.Time
 	for {
 		select {
 		case <-c.done:
 			return
 		case <-t.C:
-			if c.unanswered.Add(1) > keepaliveMisses {
-				m.dropConn(c)
-				return
+			// Count a miss only for a ping that actually reached the socket.
+			//
+			// writeLoop can sit blocked inside a single write for as long as
+			// the peer's receive window stays full, which a file transfer
+			// over a slow link does routinely. A queued-but-unsent ping is
+			// not evidence the peer stopped answering, and treating it as
+			// such would drop a working connection after keepaliveMisses
+			// ticks — precisely while a transfer is doing its job. A
+			// genuinely dead socket is still caught, and sooner: the write
+			// deadline (transport.IOTimeout) fires well inside the
+			// keepaliveMisses budget.
+			if !pingQueuedAt.IsZero() && c.wroteSince(pingQueuedAt) {
+				if c.unanswered.Add(1) > keepaliveMisses {
+					m.dropConn(c)
+					return
+				}
 			}
 			if err := m.enqueue(c, proto.TypePing, nil); err != nil {
 				m.dropConn(c)
 				return
 			}
+			pingQueuedAt = time.Now()
 		}
 	}
+}
+
+// wroteSince reports whether writeLoop finished a write at or after t. A
+// connection that has never completed one counts as not having written.
+//
+// Pings go on the priority queue, which writeLoop drains ahead of bulk
+// frames, so a write completing after a ping was queued means that ping is
+// off our hands.
+func (c *conn) wroteSince(t time.Time) bool {
+	last := c.lastWriteDone.Load()
+	if last == 0 {
+		return false
+	}
+	return !time.Unix(0, last).Before(t)
 }
 
 // outFrame is a frame queued for sending but not yet sealed.
@@ -602,30 +665,75 @@ type outFrame struct {
 	payload []byte
 }
 
+// bulkQueueDepth is how many file-transfer frames may wait behind the
+// priority queue.
+//
+// It is deliberately small, and not a throughput knob: the socket's own send
+// buffer governs throughput, and a deeper queue would only add frames that a
+// cancelled transfer has to let drain before it stops being sent. Four frames
+// is ~16 KiB of latency between deciding to stop and stopping.
+const bulkQueueDepth = 4
+
 // writeLoop serializes outbound frames for one peer. It is the only goroutine
 // that seals or writes for this connection, which is what makes sequence
 // numbers match wire order.
+//
+// Control and chat frames are drained ahead of bulk ones, unconditionally.
+// Nothing is lost to starvation by doing so: the priority queue carries one
+// ping per keepaliveInterval plus whatever a human types, so it empties
+// immediately and bulk frames follow. The ordering exists because the
+// alternative is fatal — a file transfer that delays a ping past
+// keepaliveMisses makes keepaliveLoop drop a working connection.
 func (m *Manager) writeLoop(c *conn) {
 	defer m.wg.Done()
 	for {
+		// Priority pass: take a control frame if one is waiting.
 		select {
 		case <-c.done:
 			return
 		case f := <-c.send:
-			buf, err := c.sess.Seal(f.typ, f.payload)
-			if err != nil {
-				// Seal fails only on a closed session or an oversized
-				// payload. enqueue rejects the latter before queueing, so
-				// reaching here means the session is gone.
-				m.dropConn(c)
+			if !m.writeFrame(c, f) {
 				return
 			}
-			if err := c.io.Send(buf); err != nil {
-				m.dropConn(c)
+			continue
+		default:
+		}
+		// Nothing urgent; wait for either queue.
+		select {
+		case <-c.done:
+			return
+		case f := <-c.send:
+			if !m.writeFrame(c, f) {
+				return
+			}
+		case f := <-c.bulk:
+			if !m.writeFrame(c, f) {
 				return
 			}
 		}
 	}
+}
+
+// writeFrame seals and writes one frame. It reports whether writeLoop should
+// keep going; on failure it has already torn the connection down.
+func (m *Manager) writeFrame(c *conn, f outFrame) bool {
+	buf, err := c.sess.Seal(f.typ, f.payload)
+	if err != nil {
+		// Seal fails only on a closed session or an oversized payload.
+		// enqueue rejects the latter before queueing, so reaching here means
+		// the session is gone.
+		m.dropConn(c)
+		return false
+	}
+	if err := c.io.Send(buf); err != nil {
+		m.dropConn(c)
+		return false
+	}
+	// A relay counts the length prefix as well as the frame
+	// (docs/rendezvous.md §6).
+	c.bytesSent.Add(int64(len(buf)) + 4)
+	c.lastWriteDone.Store(time.Now().UnixNano())
+	return true
 }
 
 // enqueue queues a frame for a peer, to be sealed by its writeLoop.
@@ -644,6 +752,27 @@ func (m *Manager) enqueue(c *conn, typ byte, payload []byte) error {
 		return errors.New("session: connection closed")
 	default:
 		return errors.New("session: send queue full")
+	}
+}
+
+// enqueueBulk queues a file-transfer frame, blocking until there is room.
+//
+// Blocking is the point. The caller is a loop reading a file as fast as the
+// socket will take it, and the only correct answer to a full queue is to stop
+// reading — which is what blocking here achieves, propagating backpressure
+// from the socket all the way to the file. Returning an error instead would
+// leave the caller to spin or to drop part of a file.
+func (m *Manager) enqueueBulk(ctx context.Context, c *conn, typ byte, payload []byte) error {
+	if len(payload) > proto.MaxPlaintext {
+		return fmt.Errorf("proto: payload too large (%d > %d)", len(payload), proto.MaxPlaintext)
+	}
+	select {
+	case c.bulk <- outFrame{typ: typ, payload: payload}:
+		return nil
+	case <-c.done:
+		return errors.New("session: connection closed")
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
