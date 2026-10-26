@@ -30,6 +30,15 @@ identity fingerprints (Ed25519), never by display name.
 - Interactive terminal chat with multiple simultaneous peers:
   `/connect`, `/msg`, `/all`, `/peers`, `/verify`, `/help`, `/quit`
   (bare text broadcasts to everyone).
+- **File transfer** — `/send <peer> <file>`, with `/transfers` and `/cancel`.
+  A file rides the same authenticated session as chat, split across frames and
+  reassembled by the receiver, and ends with a SHA-256 check so a partial or
+  tampered transfer is discarded rather than published. Chat stays responsive
+  while a file is in flight. Incoming files are accepted automatically into
+  `~/.heimdall/downloads/<fingerprint>/`: Heimdall constrains where a file may
+  land and how large it may be, not whether a peer may send one — see
+  [docs/threat-model.md](docs/threat-model.md), and `-no-file-transfer` to
+  refuse them.
 - **Mutually authenticated key exchange** — Noise `XX`-pattern handshake;
   both peers sign the full transcript with their identity keys, so MITM
   attempts fail the handshake.
@@ -137,6 +146,9 @@ can be added without touching the end-to-end encryption.
    working IPv6 or on one LAN never touch a relay.
 4. ~~**NAT hole punching**~~ — TCP simultaneous open, coordinated by the
    rendezvous, with relay fallback when a NAT will not cooperate.
+5. ~~**File transfer**~~ — `/send`, specified in
+   [docs/protocol.md](docs/protocol.md) §13. No new transport and no protocol
+   version bump: a file is carried as ordinary session frames.
 
 Still planned:
 
@@ -145,7 +157,8 @@ Still planned:
 
 Explicit non-goals: anonymous routing, traffic-analysis resistance, offline
 message queueing, group chats, and migrating a live session from the relay to
-a direct path mid-conversation.
+a direct path mid-conversation. A file transfer is not resumable either: it
+does not survive the connection it runs on.
 
 ## Security
 

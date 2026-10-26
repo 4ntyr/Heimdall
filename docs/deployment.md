@@ -204,8 +204,35 @@ fake them.
 | `/all <text>` | broadcast to all connected peers (same as typing bare text) |
 | `/peers` | list connected peers, their trust level and fingerprints |
 | `/verify <name>` | mark a peer's fingerprint as verified |
+| `/send <name> <path>` | send a file to one peer |
+| `/transfers` | list transfers in progress, with percentages |
+| `/cancel <id>` | stop a transfer (ids come from `/transfers`) |
 | `/help` | show the full help |
 | `/quit` | exit |
+
+### Sending and receiving files
+
+`/send <name> <path>` offers a file to a connected peer. The path is taken as
+the rest of the line, so names containing spaces need no quoting.
+
+Incoming files are **accepted automatically** and written to
+`<data>/downloads/<fingerprint>/`, where the directory is named from the
+sender's identity key rather than their display name. Heimdall decides *where*
+a file may land and *how large* it may be — a peer cannot choose a path, escape
+that directory, replace a file you already have, or exceed the size cap — but it
+does not ask you first. `-no-file-transfer` refuses incoming files outright;
+sending is unaffected. See `docs/threat-model.md` for what that default does and
+does not protect.
+
+Every transfer ends with a SHA-256 check. A file whose contents do not match is
+discarded rather than published, so a partial or tampered transfer never
+appears as a finished file.
+
+Two limits are worth knowing. A transfer does not survive its connection —
+there is no resume, so a dropped session abandons the file. And on a **relayed**
+connection the relay closes a circuit after 256 MiB in each direction,
+cumulatively, so Heimdall refuses an offer that would not fit rather than
+letting the circuit close mid-file.
 
 ### Verifying a peer (important for security)
 
@@ -238,6 +265,10 @@ hmdl -h
 | `-relay-pin` | — | certificate pin for a self-signed relay (printed by `hmdl-relay` at startup) |
 | `-relay-verify` | off | refuse a relay certificate that cannot be verified, instead of tolerating interception |
 | `-proxy` | `$HTTPS_PROXY` | HTTP proxy to reach the relay through |
+| `-downloads` | `<data>/downloads` | where received files are written |
+| `-max-file-size` | 1 GiB | largest file to accept, in bytes |
+| `-max-transfers` | 16 | most transfers to run at once |
+| `-no-file-transfer` | off | refuse incoming files; sending is unaffected |
 
 Passing `-listen ""` disables the listener entirely. Everything still works
 through a relay, and nothing on your machine accepts inbound connections.
