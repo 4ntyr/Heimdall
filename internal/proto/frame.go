@@ -31,6 +31,14 @@ const (
 	// binding a rendezvous-established session to that code
 	// (docs/rendezvous.md §4).
 	TypePairConfirm byte = 5
+	// File transfer (docs/protocol.md §13). A file rides the established
+	// session as a run of ordinary frames; there is no second connection and
+	// no separate key schedule.
+	TypeFileOffer  byte = 6
+	TypeFileAccept byte = 7
+	TypeFileChunk  byte = 8
+	TypeFileDone   byte = 9
+	TypeFileCancel byte = 10
 )
 
 const (
@@ -40,6 +48,10 @@ const (
 	MaxPlaintext = 4096
 	// maxFrame bounds a whole serialized frame (header + AEAD blob).
 	maxFrame = headerSize + MaxPlaintext + 64
+	// MaxFileChunk is the most file data one TypeFileChunk frame can carry:
+	// MaxPlaintext less the transfer id and offset that precede it
+	// (docs/protocol.md §13.1).
+	MaxFileChunk = MaxPlaintext - fileChunkHeader
 )
 
 var (
@@ -89,7 +101,8 @@ func parseFrame(buf []byte) (*frame, error) {
 		return nil, fmt.Errorf("%w: bad version %d", ErrMalformed, buf[0])
 	}
 	switch buf[1] {
-	case TypeChat, TypePing, TypePong, TypeClose, TypePairConfirm:
+	case TypeChat, TypePing, TypePong, TypeClose, TypePairConfirm,
+		TypeFileOffer, TypeFileAccept, TypeFileChunk, TypeFileDone, TypeFileCancel:
 	default:
 		return nil, fmt.Errorf("%w: bad type %d", ErrMalformed, buf[1])
 	}

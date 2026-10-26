@@ -155,9 +155,21 @@ shown.
 | 3 | `TypePong` | Keepalive response |
 | 4 | `TypeClose` | Clean session termination |
 | 5 | `TypePairConfirm` | Proof of holding an invite code (`docs/rendezvous.md` §4) |
+| 6 | `TypeFileOffer` | Offer to send a file (§13) |
+| 7 | `TypeFileAccept` | Agreement to receive an offered file (§13) |
+| 8 | `TypeFileChunk` | One slice of a file's contents (§13) |
+| 9 | `TypeFileDone` | End of a file, with its digest (§13) |
+| 10 | `TypeFileCancel` | Abandon a transfer in either direction (§13) |
 
 `Ping/Pong/Close/PairConfirm` participate in the same ratchet and replay window
-as chat messages, so control traffic cannot be replayed or injected either.
+as chat messages, so control traffic cannot be replayed or injected either. So
+do the file types: a transfer is carried entirely inside the established
+session and is encrypted, sequenced and replay-protected exactly as chat is.
+
+A receiver drops any type it does not recognise. Because the version byte is
+asserted rather than negotiated (§6), an older peer treats types 6–10 as
+malformed and silently discards them; §13 explains how a sender detects that
+rather than waiting forever.
 
 ## 8. Replay protection, ordering, and key rotation
 
@@ -237,6 +249,11 @@ nothing about cryptography or the UI; the protocol knows nothing about sockets.
 | Invalid rotation epoch | Drop frame |
 | Identity key changed | Mark UNTRUSTED, warn user, keep old record until user acts |
 | Timeout | Close connection; session manager may reconnect with a fresh handshake |
+| Malformed file payload (§13) | Cancel that transfer; the session continues |
+| File chunk offset not the expected one (§13) | Cancel that transfer; discard the partial file |
+| File exceeds its declared size or the local cap (§13) | Cancel that transfer; discard the partial file |
+| File digest mismatch at `TypeFileDone` (§13) | Discard the partial file; never publish it; report to the user |
+| `TypeFileCancel` for an unknown transfer | Ignore (never answer with a cancel of your own) |
 
 ## 12. Relationship to NAT traversal
 
@@ -256,7 +273,128 @@ authenticates *first contact* over an untrusted relay, and is mandatory
 whenever the local side used an invite code. It changes neither the handshake
 nor the session keys; see `docs/rendezvous.md` §4.
 
-## 13. Explicit non-goals
+## 13. File transfer
+
+A file is carried as ordinary session frames (§6) — the same AEAD, the same
+sequence numbers, the same replay window and the same key rotation that chat
+uses. There is no second connection, no separate key schedule and no change to
+the handshake. The transport's 1 MiB frame ceiling (§10) is irrelevant here:
+`MaxPlaintext` (4096) binds first, so a file is split across many frames and
+reassembled by the receiver.
+
+### 13.1 Payload formats
+
+All integers are big-endian. Each payload must fit `MaxPlaintext`.
+
+| Type | Payload |
+|---|---|
+| `TypeFileOffer` | `transfer_id(8) \| size(8) \| name_len(2) \| name(name_len)` |
+| `TypeFileAccept` | `transfer_id(8) \| start_offset(8)` |
+| `TypeFileChunk` | `transfer_id(8) \| offset(8) \| data(1..4080)` |
+| `TypeFileDone` | `transfer_id(8) \| sha256(32)` |
+| `TypeFileCancel` | `transfer_id(8) \| reason(1)` |
+
+`transfer_id` is 64 random bits chosen by the sender, scoped to one session and
+one direction. `name` is at most 255 bytes of valid UTF-8 and is **never** a
+path — see §13.5. A chunk carries at most `MaxPlaintext - 16` = 4080 bytes.
+
+### 13.2 Exchange
+
+```
+Sender                                          Receiver
+------                                          --------
+TypeFileOffer{id, size, name}
+        --------------------------------------->
+                                                decide (§13.5); on refusal
+                                                TypeFileCancel{id, reason}
+        <---------------------------------------
+                                                on acceptance
+                                                TypeFileAccept{id, start_offset}
+        <---------------------------------------
+TypeFileChunk{id, offset, data}   (repeated)
+        --------------------------------------->
+TypeFileDone{id, sha256}
+        --------------------------------------->
+                                                verify digest, publish or discard
+```
+
+The sender **must not** send chunks before an Accept. Two reasons: a receiver
+that refuses would otherwise have already been sent the data, which over a relay
+spends a byte budget that cannot be reclaimed (`docs/rendezvous.md` §6); and
+because the protocol version is asserted rather than negotiated (§6), an Accept
+that never arrives is the only way a sender can learn the peer is too old to
+understand types 6–10. A sender that gets no Accept and no Cancel within a
+bounded time abandons the offer and tells its user the peer does not support
+file transfer.
+
+The digest travels in `TypeFileDone`, not in the offer, so the sender hashes
+incrementally as it reads. Hashing up front would require reading the whole file
+twice and would describe the bytes as they were *before* the transfer rather
+than the bytes actually sent.
+
+`start_offset` lets a future version resume a partial file; it is the receiver's
+to choose, because only the receiver knows how much it already holds. This
+version always sends 0, and a sender rejects any value other than 0.
+
+### 13.3 Chunk ordering is a requirement, not a hint
+
+The underlying stream is reliable and ordered (§10), so `offset` is not needed
+for reassembly. It is carried so that the receiver can *enforce* placement
+rather than trust it. For every chunk the receiver requires:
+
+- `offset` equals the number of bytes it has already written for this transfer;
+- `data` is non-empty;
+- `offset + len(data)` is within both the offer's declared `size` and the
+  receiver's own cap.
+
+Any violation cancels the transfer and discards the partial file. A receiver
+never seeks: a peer cannot direct a write to an arbitrary position, and a
+declared `size` is an upper bound to check, never an allocation to make.
+
+### 13.4 Forward compatibility
+
+Decoders **must** ignore bytes trailing the fields defined above; encoders
+**must not** rely on their absence. A later version may therefore append fields
+to any of these payloads without a new type or a version bump. This is the only
+sanctioned extension mechanism for file transfer, and it is the reason no
+reserved padding is defined.
+
+`TypeFileChunk` is the one exception, and it cannot be otherwise: everything
+after its 16-byte header *is* the chunk data, so there is no trailing region to
+extend into. A future version that needs a per-chunk field must introduce a new
+type for it. The four control payloads are where extension room exists, and they
+are where it is needed.
+
+Strictness applies to everything else: a payload shorter than its fixed fields,
+a `name_len` that overruns the payload, a name that is not valid UTF-8, or an
+empty chunk is malformed and cancels the transfer.
+
+### 13.5 What the receiver decides
+
+Accepting a file means writing attacker-chosen bytes under an attacker-chosen
+name to local disk, so the receiver — not the sender — owns every such decision:
+
+- A peer whose identity key has changed (§9) is refused outright. That state is
+  an unresolved MITM warning; it is not a state in which to write files.
+- The name is treated as a label, never a path, and is sanitised to a single
+  filename before use. An existing file is never overwritten.
+- Size, count and inactivity limits are the receiver's own, independent of
+  anything the sender declares.
+- A completed file is published only after its digest matches §13.1's `sha256`.
+
+`docs/threat-model.md` states which of these are security boundaries and which
+are merely hygiene.
+
+### 13.6 Cancellation
+
+Either side may send `TypeFileCancel` at any time; `reason` is advisory and for
+display. A `TypeFileCancel` naming a transfer the receiver does not know is
+**ignored** — answering it with another cancel would let two peers volley
+forever. Cancelling a transfer never ends the session, and losing the session
+cancels every transfer on it: no transfer state survives a reconnect.
+
+## 14. Explicit non-goals
 
 No padding/traffic-analysis resistance, no anonymous routing, no offline
-message queueing, no group chats.
+message queueing, no group chats. File transfer is not resumable across a
+dropped session, and `start_offset` (§13.2) is reserved but unused.

@@ -23,6 +23,7 @@ import (
 	"github.com/4ntyr/heimdall/internal/peers"
 	"github.com/4ntyr/heimdall/internal/rendezvous"
 	"github.com/4ntyr/heimdall/internal/session"
+	"github.com/4ntyr/heimdall/internal/transfer"
 	"github.com/4ntyr/heimdall/internal/transport"
 )
 
@@ -45,6 +46,12 @@ Flags:
   -relay-pin    certificate pin for a self-signed relay (printed by hmdl-relay)
   -relay-verify require a valid relay certificate (see below)
   -proxy        HTTP proxy for reaching the relay; defaults to HTTPS_PROXY
+  -downloads    where received files are written
+                (default "<data>/downloads")
+  -max-file-size  largest file to accept, in bytes (default 1 GiB)
+  -max-transfers  most transfers to run at once (default 16)
+  -no-file-transfer
+                refuse incoming files; sending is unaffected
 
 Interactive commands:
   /invite             publish an invite code for a peer to join with
@@ -54,8 +61,16 @@ Interactive commands:
   /all <text>         broadcast a message to all connected peers
   /peers              list connected peers, their trust level and path
   /verify <name>      mark a peer's fingerprint as verified
+  /send <name> <path> send a file to one peer
+  /transfers          list transfers in progress
+  /cancel <id>        stop a transfer (ids come from /transfers)
   /help               show this help
   /quit               exit
+
+Files you receive are written to the downloads directory automatically, under
+a folder named after the sender's fingerprint. Heimdall decides where a file
+may go and how large it may be, not whether a peer may send one — see
+docs/threat-model.md, and -no-file-transfer to refuse them.
 
 Relay privacy: the relay forwards encrypted frames only. It never sees your
 messages, your name or your identity key, and it cannot impersonate a peer —
@@ -82,6 +97,10 @@ func run() error {
 	relayPin := fs.String("relay-pin", "", "relay certificate pin")
 	relayVerify := fs.Bool("relay-verify", false, "require a valid relay certificate")
 	proxy := fs.String("proxy", "", "HTTP proxy for reaching the relay")
+	downloads := fs.String("downloads", "", "directory for received files (default \"<data>/downloads\")")
+	maxFileSize := fs.Int64("max-file-size", transfer.DefaultLimits().MaxFileSize, "largest file to accept, in bytes")
+	maxTransfers := fs.Int("max-transfers", transfer.DefaultLimits().MaxTotal, "most transfers to run at once")
+	noFileTransfer := fs.Bool("no-file-transfer", false, "refuse incoming files (sending is unaffected)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
 	}
@@ -99,6 +118,19 @@ func run() error {
 	}
 
 	mgr := session.NewManager(id, store)
+
+	// File transfer (docs/protocol.md §13). Incoming files are accepted
+	// automatically; -no-file-transfer refuses them outright, and the caps
+	// below bound what a peer can cause regardless.
+	limits := transfer.DefaultLimits()
+	limits.MaxFileSize = *maxFileSize
+	limits.MaxTotal = *maxTransfers
+	limits.AcceptIncoming = !*noFileTransfer
+	downloadDir := *downloads
+	if downloadDir == "" {
+		downloadDir = filepath.Join(*data, "downloads")
+	}
+	mgr.EnableTransfers(downloadDir, limits)
 	addr, err := mgr.Listen(*listen)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", *listen, err)
@@ -285,7 +317,66 @@ func printEvent(ev session.Event) {
 		fmt.Printf("\n!!! SECURITY WARNING !!!\n%s\n> ", ev.Text)
 	case session.EventError:
 		fmt.Printf("\n*** error: %s\n> ", ev.Text)
+	case session.EventTransferStarted:
+		t := ev.Transfer
+		if t.Outgoing {
+			fmt.Printf("\n*** sending %s to %s (%s)\n> ",
+				transfer.DisplayName(t.Name), ev.Peer, humanBytes(t.Size))
+			break
+		}
+		fmt.Printf("\n*** receiving %s from %s (%s)\n> ",
+			transfer.DisplayName(t.Name), ev.Peer, humanBytes(t.Size))
+	case session.EventTransferProgress:
+		t := ev.Transfer
+		fmt.Printf("\n*** %s %s %d%% (%s of %s)\n> ",
+			transferVerb(t.Outgoing), transfer.DisplayName(t.Name), t.Percent,
+			humanBytes(t.Done), humanBytes(t.Size))
+	case session.EventTransferDone:
+		t := ev.Transfer
+		if t.Outgoing {
+			fmt.Printf("\n*** sent %s to %s\n> ", transfer.DisplayName(t.Name), ev.Peer)
+			break
+		}
+		fmt.Printf("\n*** received %s from %s -> %s\n> ",
+			transfer.DisplayName(t.Name), ev.Peer, t.Path)
+	case session.EventTransferFailed:
+		t := ev.Transfer
+		fmt.Printf("\n*** transfer of %s %s: %v\n> ",
+			transfer.DisplayName(t.Name), failedDirection(t.Outgoing, ev.Peer), t.Err)
 	}
+}
+
+// transferVerb describes a transfer in progress.
+func transferVerb(outgoing bool) string {
+	if outgoing {
+		return "sending"
+	}
+	return "receiving"
+}
+
+// failedDirection describes which way a failed transfer was going.
+func failedDirection(outgoing bool, peer string) string {
+	if outgoing {
+		return "to " + peer + " failed"
+	}
+	return "from " + peer + " failed"
+}
+
+// humanBytes renders a byte count compactly. Sizes here span a few bytes to a
+// gigabyte, and a raw figure in that range is hard to read at a glance.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	v := float64(n)
+	for _, suffix := range []string{"KiB", "MiB", "GiB", "TiB"} {
+		v /= unit
+		if v < unit {
+			return fmt.Sprintf("%.1f %s", v, suffix)
+		}
+	}
+	return fmt.Sprintf("%.1f PiB", v/unit)
 }
 
 // repl is the interactive read-eval-print loop over stdin.
@@ -413,6 +504,51 @@ func handleCommand(mgr *session.Manager, store *peers.Store, cfg connect.Config,
 			break
 		}
 		fmt.Println("verified", p.Name)
+
+	case "send":
+		// strings.Fields would split a path containing spaces, so only the
+		// command and the peer name are taken as fields and the rest of the
+		// line is the path, verbatim.
+		parts := strings.SplitN(strings.TrimSpace(line), " ", 3)
+		if len(parts) < 3 || strings.TrimSpace(parts[2]) == "" {
+			fmt.Println("usage: /send <name> <path>")
+			break
+		}
+		peer, path := parts[1], strings.TrimSpace(parts[2])
+		// Offering reads and stats the file, so it runs off the REPL and
+		// reports through events, like /join does.
+		fmt.Printf("Offering %s to %s…\n", transfer.DisplayName(filepath.Base(path)), peer)
+		go func() {
+			if _, err := mgr.SendFile(context.Background(), peer, path); err != nil {
+				fmt.Printf("\n*** send failed: %v\n> ", err)
+			}
+		}()
+
+	case "transfers":
+		list := mgr.Transfers()
+		if len(list) == 0 {
+			fmt.Println("(no transfers in progress)")
+			break
+		}
+		for _, p := range list {
+			fmt.Printf("  %d  %s\n", p.ID, p)
+		}
+
+	case "cancel":
+		if len(fields) < 2 {
+			fmt.Println("usage: /cancel <id>")
+			break
+		}
+		id, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			fmt.Println("cancel failed: ids are numbers, as shown by /transfers")
+			break
+		}
+		if err := mgr.CancelTransfer(id); err != nil {
+			fmt.Println("cancel failed:", err)
+			break
+		}
+		fmt.Println("cancelled", id)
 
 	default:
 		fmt.Println("unknown command; try /help")

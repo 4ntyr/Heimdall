@@ -5,6 +5,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"github.com/4ntyr/heimdall/internal/identity"
 	"github.com/4ntyr/heimdall/internal/peers"
 	"github.com/4ntyr/heimdall/internal/proto"
+	"github.com/4ntyr/heimdall/internal/transfer"
 	"github.com/4ntyr/heimdall/internal/transport"
 )
 
@@ -27,7 +29,41 @@ const (
 	EventMessage
 	EventSecurityWarning
 	EventError
+	// File transfer (docs/protocol.md §13). These carry Transfer rather than
+	// Text, so a caller formats the numbers instead of parsing them back out
+	// of a sentence.
+	EventTransferStarted
+	EventTransferProgress
+	EventTransferDone
+	EventTransferFailed
 )
+
+// TransferInfo describes one file transfer at a moment in time.
+//
+// Counts are absolute rather than incremental. Events are dropped when the UI
+// falls behind (see emit), so an update has to make sense on its own.
+type TransferInfo struct {
+	// ID identifies the transfer within its peer's session.
+	ID uint64
+	// Outgoing is true for a file being sent, false for one arriving.
+	Outgoing bool
+	// Peer is the display name of the other side.
+	Peer string
+	// Name is the file name. It comes from the peer for an incoming
+	// transfer, so render it quoted — see transfer.DisplayName.
+	Name string
+	// Size is the declared total, Done the bytes transferred so far.
+	Size int64
+	Done int64
+	// Percent is completion, 0 when the size is unknown.
+	Percent int
+	// StateName describes the state for display.
+	StateName string
+	// Path is where an arrived file was published.
+	Path string
+	// Err explains a failed transfer.
+	Err error
+}
 
 // Event is delivered from the Manager to the chat layer.
 type Event struct {
@@ -43,6 +79,8 @@ type Event struct {
 	// Path records how the connection was established (see PathDirect and
 	// friends). Empty for events that do not concern one connection.
 	Path string
+	// Transfer is set on the EventTransfer* types only.
+	Transfer *TransferInfo
 }
 
 // How a connection was established, for display. Connectivity is identical on
@@ -91,6 +129,12 @@ type Manager struct {
 	// reconnect bookkeeping
 	reconnectDelay time.Duration
 
+	// transfers is the file-transfer registry, nil when the feature is off.
+	transfers *transfer.Registry
+	// closed is shut on Shutdown, so long-lived helpers that are not tied to
+	// one connection can stop.
+	closed chan struct{}
+
 	// inboundHook, when set, is consulted for every inbound connection. It
 	// lets the layer that owns rendezvous state say that a connection belongs
 	// to one, so the accepting side applies the same pairing requirement as
@@ -107,9 +151,15 @@ type conn struct {
 	sess  *proto.Session
 	trust peers.TrustLevel
 	addr  string
-	send  chan []byte
+	send  chan outFrame
+	bulk  chan outFrame
 	done  chan struct{}
 	once  sync.Once
+
+	// chunks carries inbound file data from readLoop to diskLoop, so disk
+	// writes never happen on the goroutine that has to keep answering the
+	// peer.
+	chunks chan inboundChunk
 
 	// path is how this connection was established.
 	path string
@@ -119,6 +169,20 @@ type conn struct {
 	// connection. An announced connection is never swapped out from under
 	// them; see settleDelay.
 	announced atomic.Bool
+
+	// lastWriteDone is when writeLoop last completed a write, as Unix
+	// nanoseconds. Keepalive reads it to tell "the peer is not answering"
+	// apart from "we have not managed to send anything yet"; see
+	// keepaliveLoop.
+	lastWriteDone atomic.Int64
+	// busy counts file transfers currently running on this connection.
+	// preferNew consults it so a transfer is not torn down by a duplicate
+	// connection arriving mid-file.
+	busy atomic.Int32
+	// bytesSent totals what this connection has written at the framing
+	// layer, which is what a relay counts against its circuit budget
+	// (docs/rendezvous.md §6).
+	bytesSent atomic.Int64
 }
 
 // NewManager creates a Manager bound to an identity and trust store.
@@ -130,6 +194,7 @@ func NewManager(id *identity.Identity, store *peers.Store) *Manager {
 		byName:         make(map[string]*conn),
 		events:         make(chan Event, 256),
 		reconnectDelay: 2 * time.Second,
+		closed:         make(chan struct{}),
 	}
 }
 
@@ -373,15 +438,17 @@ func (m *Manager) runHandshake(fio *transport.FrameIO, opts AdoptOptions) error 
 		path = PathDirect
 	}
 	c := &conn{
-		fp:    res.PeerFingerprint,
-		name:  res.PeerName,
-		io:    fio,
-		sess:  res.Session,
-		trust: trust,
-		addr:  fio.RemoteAddr(),
-		send:  make(chan []byte, 64),
-		done:  make(chan struct{}),
-		path:  path,
+		fp:     res.PeerFingerprint,
+		name:   res.PeerName,
+		io:     fio,
+		sess:   res.Session,
+		trust:  trust,
+		addr:   fio.RemoteAddr(),
+		send:   make(chan outFrame, 64),
+		bulk:   make(chan outFrame, bulkQueueDepth),
+		chunks: make(chan inboundChunk, chunkQueueDepth),
+		done:   make(chan struct{}),
+		path:   path,
 	}
 	if !m.register(c) {
 		// A better connection to this peer is already established. Close this
@@ -394,10 +461,14 @@ func (m *Manager) runHandshake(fio *transport.FrameIO, opts AdoptOptions) error 
 		}
 		return nil
 	}
-	m.wg.Add(3)
+	m.wg.Add(4)
 	go m.readLoop(c)
 	go m.writeLoop(c)
 	go m.keepaliveLoop(c)
+	// diskLoop is tracked like the rest: Shutdown waits on the group and the
+	// caller then exits the process, so a writer outside it would be killed
+	// with a buffer half-flushed and leave a corrupt partial file.
+	go m.diskLoop(c)
 	time.AfterFunc(settleDelay, func() { m.announce(c) })
 	if opts.OnEstablished != nil {
 		opts.OnEstablished()
@@ -507,6 +578,21 @@ func (m *Manager) register(c *conn) bool {
 // A connection that has stopped answering keepalives is replaceable outright,
 // so a peer reconnecting over a black-holed path is never refused.
 func preferNew(old, new *conn) bool {
+	// A connection carrying a file transfer is not swapped out for a
+	// duplicate path.
+	//
+	// The unanswered test below is deliberately generous — one tick with no
+	// pong yet is enough to make a connection replaceable — because for chat
+	// a swap costs nothing. For a transfer it costs the whole file: there is
+	// no resume, so the transfer dies with the socket. Since keepaliveLoop
+	// raises unanswered on every tick and only clears it when the pong
+	// arrives, a long transfer would otherwise spend a slice of every
+	// keepaliveInterval replaceable by any inbound handshake. Hold on until
+	// the connection is properly unresponsive, at which point the transfer is
+	// lost regardless.
+	if old.busy.Load() > 0 && old.unanswered.Load() <= keepaliveMisses {
+		return false
+	}
 	if old.unanswered.Load() > 0 {
 		return true
 	}
@@ -556,6 +642,9 @@ func (m *Manager) readLoop(c *conn) {
 			c.unanswered.Store(0)
 		case proto.TypeClose:
 			return
+		case proto.TypeFileOffer, proto.TypeFileAccept, proto.TypeFileChunk,
+			proto.TypeFileDone, proto.TypeFileCancel:
+			m.dispatchFile(c, typ, pt)
 		}
 	}
 }
@@ -572,52 +661,175 @@ func (m *Manager) keepaliveLoop(c *conn) {
 	defer m.wg.Done()
 	t := time.NewTicker(keepaliveInterval)
 	defer t.Stop()
+	// pingQueuedAt is when the outstanding ping was handed to the queue, zero
+	// before the first one.
+	var pingQueuedAt time.Time
 	for {
 		select {
 		case <-c.done:
 			return
 		case <-t.C:
-			if c.unanswered.Add(1) > keepaliveMisses {
-				m.dropConn(c)
-				return
+			// Count a miss only for a ping that actually reached the socket.
+			//
+			// writeLoop can sit blocked inside a single write for as long as
+			// the peer's receive window stays full, which a file transfer
+			// over a slow link does routinely. A queued-but-unsent ping is
+			// not evidence the peer stopped answering, and treating it as
+			// such would drop a working connection after keepaliveMisses
+			// ticks — precisely while a transfer is doing its job. A
+			// genuinely dead socket is still caught, and sooner: the write
+			// deadline (transport.IOTimeout) fires well inside the
+			// keepaliveMisses budget.
+			if !pingQueuedAt.IsZero() && c.wroteSince(pingQueuedAt) {
+				if c.unanswered.Add(1) > keepaliveMisses {
+					m.dropConn(c)
+					return
+				}
 			}
 			if err := m.enqueue(c, proto.TypePing, nil); err != nil {
 				m.dropConn(c)
 				return
 			}
+			pingQueuedAt = time.Now()
 		}
 	}
 }
 
-// writeLoop serializes outbound frames for one peer.
+// wroteSince reports whether writeLoop finished a write at or after t. A
+// connection that has never completed one counts as not having written.
+//
+// Pings go on the priority queue, which writeLoop drains ahead of bulk
+// frames, so a write completing after a ping was queued means that ping is
+// off our hands.
+func (c *conn) wroteSince(t time.Time) bool {
+	last := c.lastWriteDone.Load()
+	if last == 0 {
+		return false
+	}
+	return !time.Unix(0, last).Before(t)
+}
+
+// outFrame is a frame queued for sending but not yet sealed.
+//
+// Sealing happens in writeLoop rather than at enqueue time so that the
+// sequence number and rotation epoch a frame carries are assigned in the order
+// the frames actually reach the wire. The queue therefore holds plaintext, and
+// a payload must not be modified after it is enqueued — writeLoop reads it
+// later, from another goroutine. Sharing one immutable payload across several
+// peers is fine; mutating one is not.
+type outFrame struct {
+	typ     byte
+	payload []byte
+}
+
+// bulkQueueDepth is how many file-transfer frames may wait behind the
+// priority queue.
+//
+// It is deliberately small, and not a throughput knob: the socket's own send
+// buffer governs throughput, and a deeper queue would only add frames that a
+// cancelled transfer has to let drain before it stops being sent. Four frames
+// is ~16 KiB of latency between deciding to stop and stopping.
+const bulkQueueDepth = 4
+
+// writeLoop serializes outbound frames for one peer. It is the only goroutine
+// that seals or writes for this connection, which is what makes sequence
+// numbers match wire order.
+//
+// Control and chat frames are drained ahead of bulk ones, unconditionally.
+// Nothing is lost to starvation by doing so: the priority queue carries one
+// ping per keepaliveInterval plus whatever a human types, so it empties
+// immediately and bulk frames follow. The ordering exists because the
+// alternative is fatal — a file transfer that delays a ping past
+// keepaliveMisses makes keepaliveLoop drop a working connection.
 func (m *Manager) writeLoop(c *conn) {
 	defer m.wg.Done()
 	for {
+		// Priority pass: take a control frame if one is waiting.
 		select {
 		case <-c.done:
 			return
-		case buf := <-c.send:
-			if err := c.io.Send(buf); err != nil {
-				m.dropConn(c)
+		case f := <-c.send:
+			if !m.writeFrame(c, f) {
+				return
+			}
+			continue
+		default:
+		}
+		// Nothing urgent; wait for either queue.
+		select {
+		case <-c.done:
+			return
+		case f := <-c.send:
+			if !m.writeFrame(c, f) {
+				return
+			}
+		case f := <-c.bulk:
+			if !m.writeFrame(c, f) {
 				return
 			}
 		}
 	}
 }
 
-// enqueue seals and queues a frame for a peer.
-func (m *Manager) enqueue(c *conn, typ byte, payload []byte) error {
-	buf, err := c.sess.Seal(typ, payload)
+// writeFrame seals and writes one frame. It reports whether writeLoop should
+// keep going; on failure it has already torn the connection down.
+func (m *Manager) writeFrame(c *conn, f outFrame) bool {
+	buf, err := c.sess.Seal(f.typ, f.payload)
 	if err != nil {
-		return err
+		// Seal fails only on a closed session or an oversized payload.
+		// enqueue rejects the latter before queueing, so reaching here means
+		// the session is gone.
+		m.dropConn(c)
+		return false
+	}
+	if err := c.io.Send(buf); err != nil {
+		m.dropConn(c)
+		return false
+	}
+	// A relay counts the length prefix as well as the frame
+	// (docs/rendezvous.md §6).
+	c.bytesSent.Add(int64(len(buf)) + 4)
+	c.lastWriteDone.Store(time.Now().UnixNano())
+	return true
+}
+
+// enqueue queues a frame for a peer, to be sealed by its writeLoop.
+//
+// The size check stays here, synchronously, so an oversized payload is still
+// reported to the caller rather than discovered by writeLoop, where the only
+// available response would be to drop the connection.
+func (m *Manager) enqueue(c *conn, typ byte, payload []byte) error {
+	if len(payload) > proto.MaxPlaintext {
+		return fmt.Errorf("proto: payload too large (%d > %d)", len(payload), proto.MaxPlaintext)
 	}
 	select {
-	case c.send <- buf:
+	case c.send <- outFrame{typ: typ, payload: payload}:
 		return nil
 	case <-c.done:
 		return errors.New("session: connection closed")
 	default:
 		return errors.New("session: send queue full")
+	}
+}
+
+// enqueueBulk queues a file-transfer frame, blocking until there is room.
+//
+// Blocking is the point. The caller is a loop reading a file as fast as the
+// socket will take it, and the only correct answer to a full queue is to stop
+// reading — which is what blocking here achieves, propagating backpressure
+// from the socket all the way to the file. Returning an error instead would
+// leave the caller to spin or to drop part of a file.
+func (m *Manager) enqueueBulk(ctx context.Context, c *conn, typ byte, payload []byte) error {
+	if len(payload) > proto.MaxPlaintext {
+		return fmt.Errorf("proto: payload too large (%d > %d)", len(payload), proto.MaxPlaintext)
+	}
+	select {
+	case c.bulk <- outFrame{typ: typ, payload: payload}:
+		return nil
+	case <-c.done:
+		return errors.New("session: connection closed")
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -628,6 +840,12 @@ func (m *Manager) dropConn(c *conn) {
 		c.sess.Close()
 		c.io.Close()
 		m.unregister(c)
+		// There is no resume, so a transfer cannot outlive its connection.
+		// Dropping them here also releases their partial files and their
+		// concurrency slots.
+		if reg := m.registry(); reg != nil {
+			reg.CancelPeer(c.fp)
+		}
 		if c.announced.Load() {
 			m.emit(Event{Type: EventPeerDisconnected, Peer: c.name, Fingerprint: c.fp, Trust: c.trust, Path: c.path})
 		}
@@ -651,18 +869,11 @@ func (m *Manager) Send(name, text string) error {
 	if !ok {
 		return fmt.Errorf("session: not connected to %q", name)
 	}
-	buf, err := c.sess.SealChat(text)
+	payload, err := proto.EncodeChatPayload(text)
 	if err != nil {
 		return err
 	}
-	select {
-	case c.send <- buf:
-		return nil
-	case <-c.done:
-		return errors.New("session: connection closed")
-	default:
-		return errors.New("session: send queue full")
-	}
+	return m.enqueue(c, proto.TypeChat, payload)
 }
 
 // Broadcast delivers a chat message to every connected peer. Returns the
@@ -674,16 +885,16 @@ func (m *Manager) Broadcast(text string) int {
 		list = append(list, c)
 	}
 	m.mu.Unlock()
+	// Encoded once and shared: enqueue never mutates a payload, and each
+	// peer's writeLoop only reads it.
+	payload, err := proto.EncodeChatPayload(text)
+	if err != nil {
+		return 0
+	}
 	n := 0
 	for _, c := range list {
-		buf, err := c.sess.SealChat(text)
-		if err != nil {
-			continue
-		}
-		select {
-		case c.send <- buf:
+		if err := m.enqueue(c, proto.TypeChat, payload); err == nil {
 			n++
-		default:
 		}
 	}
 	return n
@@ -738,6 +949,12 @@ func (m *Manager) TrustOf(name string) (peers.TrustLevel, bool) {
 // Shutdown closes the listener and all connections, and waits for loops.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
+	if !m.closing {
+		// Stops helpers that are not tied to one connection. Guarded because
+		// Shutdown is routinely called more than once (a deferred cleanup
+		// after an explicit one), and closing twice would panic.
+		close(m.closed)
+	}
 	m.closing = true
 	ln := m.ln
 	list := make([]*conn, 0, len(m.conns))
