@@ -88,6 +88,20 @@ func (f *fakeLink) lastControl(typ byte) ([]byte, bool) {
 	return nil, false
 }
 
+// lastBulk returns the most recent bulk frame of a type. The end-of-file
+// marker travels the bulk path so it cannot overtake the chunks ahead of it,
+// so it is found here rather than among the control frames.
+func (f *fakeLink) lastBulk(typ byte) ([]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.bulk) - 1; i >= 0; i-- {
+		if f.bulk[i].typ == typ {
+			return f.bulk[i].payload, true
+		}
+	}
+	return nil, false
+}
+
 func (f *fakeLink) lastProgress() (Progress, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -486,14 +500,26 @@ func TestSendStreamsAndCompletes(t *testing.T) {
 	r.Accept(l, id, 0)
 
 	// Then chunks, then a done frame carrying the digest.
-	waitFor(t, func() bool { _, ok := l.lastControl(proto.TypeFileDone); return ok })
+	waitFor(t, func() bool { _, ok := l.lastBulk(proto.TypeFileDone); return ok })
 
 	l.mu.Lock()
-	chunks := make([]frameRec, len(l.bulk))
-	copy(chunks, l.bulk)
+	var chunks []frameRec
+	for _, f := range l.bulk {
+		if f.typ == proto.TypeFileChunk {
+			chunks = append(chunks, f)
+		}
+	}
+	bulkLen := len(l.bulk)
+	lastTyp := l.bulk[bulkLen-1].typ
 	l.mu.Unlock()
 	if len(chunks) != 3 {
 		t.Fatalf("%d chunk frames, want 3", len(chunks))
+	}
+	// The marker must be last on the bulk path, or it would reach the peer
+	// before chunks still queued behind it and the digest would be checked
+	// against a short file.
+	if lastTyp != proto.TypeFileDone {
+		t.Fatalf("the last bulk frame was type %d, want the end-of-file marker", lastTyp)
 	}
 
 	// Reassemble and compare, exactly as a receiver would.
@@ -515,7 +541,7 @@ func TestSendStreamsAndCompletes(t *testing.T) {
 		t.Fatalf("reassembled %d bytes, sent %d", len(got), len(body))
 	}
 
-	donePayload, _ := l.lastControl(proto.TypeFileDone)
+	donePayload, _ := l.lastBulk(proto.TypeFileDone)
 	_, digest, err := proto.DecodeFileDone(donePayload)
 	if err != nil {
 		t.Fatalf("decoding done: %v", err)

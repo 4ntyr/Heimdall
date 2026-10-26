@@ -230,7 +230,14 @@ func (s *send) stream(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := s.link.SendControl(proto.TypeFileDone, payload); err != nil {
+	// The end marker goes on the bulk path, not the control path.
+	//
+	// Control frames are written ahead of bulk ones, by design — that is what
+	// keeps a transfer from delaying a keepalive. But it means a marker sent
+	// as a control frame overtakes the chunks still queued behind it, and the
+	// receiver then checks the digest against a file that is short by however
+	// much was in flight. Queueing it with the chunks keeps it last.
+	if err := s.link.SendBulk(ctx, proto.TypeFileDone, payload); err != nil {
 		return err
 	}
 	s.state.Store(int32(Done))

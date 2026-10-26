@@ -16,6 +16,7 @@ import (
 	"github.com/4ntyr/heimdall/internal/identity"
 	"github.com/4ntyr/heimdall/internal/peers"
 	"github.com/4ntyr/heimdall/internal/proto"
+	"github.com/4ntyr/heimdall/internal/transfer"
 	"github.com/4ntyr/heimdall/internal/transport"
 )
 
@@ -28,7 +29,41 @@ const (
 	EventMessage
 	EventSecurityWarning
 	EventError
+	// File transfer (docs/protocol.md §13). These carry Transfer rather than
+	// Text, so a caller formats the numbers instead of parsing them back out
+	// of a sentence.
+	EventTransferStarted
+	EventTransferProgress
+	EventTransferDone
+	EventTransferFailed
 )
+
+// TransferInfo describes one file transfer at a moment in time.
+//
+// Counts are absolute rather than incremental. Events are dropped when the UI
+// falls behind (see emit), so an update has to make sense on its own.
+type TransferInfo struct {
+	// ID identifies the transfer within its peer's session.
+	ID uint64
+	// Outgoing is true for a file being sent, false for one arriving.
+	Outgoing bool
+	// Peer is the display name of the other side.
+	Peer string
+	// Name is the file name. It comes from the peer for an incoming
+	// transfer, so render it quoted — see transfer.DisplayName.
+	Name string
+	// Size is the declared total, Done the bytes transferred so far.
+	Size int64
+	Done int64
+	// Percent is completion, 0 when the size is unknown.
+	Percent int
+	// StateName describes the state for display.
+	StateName string
+	// Path is where an arrived file was published.
+	Path string
+	// Err explains a failed transfer.
+	Err error
+}
 
 // Event is delivered from the Manager to the chat layer.
 type Event struct {
@@ -44,6 +79,8 @@ type Event struct {
 	// Path records how the connection was established (see PathDirect and
 	// friends). Empty for events that do not concern one connection.
 	Path string
+	// Transfer is set on the EventTransfer* types only.
+	Transfer *TransferInfo
 }
 
 // How a connection was established, for display. Connectivity is identical on
@@ -92,6 +129,12 @@ type Manager struct {
 	// reconnect bookkeeping
 	reconnectDelay time.Duration
 
+	// transfers is the file-transfer registry, nil when the feature is off.
+	transfers *transfer.Registry
+	// closed is shut on Shutdown, so long-lived helpers that are not tied to
+	// one connection can stop.
+	closed chan struct{}
+
 	// inboundHook, when set, is consulted for every inbound connection. It
 	// lets the layer that owns rendezvous state say that a connection belongs
 	// to one, so the accepting side applies the same pairing requirement as
@@ -112,6 +155,11 @@ type conn struct {
 	bulk  chan outFrame
 	done  chan struct{}
 	once  sync.Once
+
+	// chunks carries inbound file data from readLoop to diskLoop, so disk
+	// writes never happen on the goroutine that has to keep answering the
+	// peer.
+	chunks chan inboundChunk
 
 	// path is how this connection was established.
 	path string
@@ -146,6 +194,7 @@ func NewManager(id *identity.Identity, store *peers.Store) *Manager {
 		byName:         make(map[string]*conn),
 		events:         make(chan Event, 256),
 		reconnectDelay: 2 * time.Second,
+		closed:         make(chan struct{}),
 	}
 }
 
@@ -389,16 +438,17 @@ func (m *Manager) runHandshake(fio *transport.FrameIO, opts AdoptOptions) error 
 		path = PathDirect
 	}
 	c := &conn{
-		fp:    res.PeerFingerprint,
-		name:  res.PeerName,
-		io:    fio,
-		sess:  res.Session,
-		trust: trust,
-		addr:  fio.RemoteAddr(),
-		send:  make(chan outFrame, 64),
-		bulk:  make(chan outFrame, bulkQueueDepth),
-		done:  make(chan struct{}),
-		path:  path,
+		fp:     res.PeerFingerprint,
+		name:   res.PeerName,
+		io:     fio,
+		sess:   res.Session,
+		trust:  trust,
+		addr:   fio.RemoteAddr(),
+		send:   make(chan outFrame, 64),
+		bulk:   make(chan outFrame, bulkQueueDepth),
+		chunks: make(chan inboundChunk, chunkQueueDepth),
+		done:   make(chan struct{}),
+		path:   path,
 	}
 	if !m.register(c) {
 		// A better connection to this peer is already established. Close this
@@ -411,10 +461,14 @@ func (m *Manager) runHandshake(fio *transport.FrameIO, opts AdoptOptions) error 
 		}
 		return nil
 	}
-	m.wg.Add(3)
+	m.wg.Add(4)
 	go m.readLoop(c)
 	go m.writeLoop(c)
 	go m.keepaliveLoop(c)
+	// diskLoop is tracked like the rest: Shutdown waits on the group and the
+	// caller then exits the process, so a writer outside it would be killed
+	// with a buffer half-flushed and leave a corrupt partial file.
+	go m.diskLoop(c)
 	time.AfterFunc(settleDelay, func() { m.announce(c) })
 	if opts.OnEstablished != nil {
 		opts.OnEstablished()
@@ -588,6 +642,9 @@ func (m *Manager) readLoop(c *conn) {
 			c.unanswered.Store(0)
 		case proto.TypeClose:
 			return
+		case proto.TypeFileOffer, proto.TypeFileAccept, proto.TypeFileChunk,
+			proto.TypeFileDone, proto.TypeFileCancel:
+			m.dispatchFile(c, typ, pt)
 		}
 	}
 }
@@ -783,6 +840,12 @@ func (m *Manager) dropConn(c *conn) {
 		c.sess.Close()
 		c.io.Close()
 		m.unregister(c)
+		// There is no resume, so a transfer cannot outlive its connection.
+		// Dropping them here also releases their partial files and their
+		// concurrency slots.
+		if reg := m.registry(); reg != nil {
+			reg.CancelPeer(c.fp)
+		}
 		if c.announced.Load() {
 			m.emit(Event{Type: EventPeerDisconnected, Peer: c.name, Fingerprint: c.fp, Trust: c.trust, Path: c.path})
 		}
@@ -886,6 +949,12 @@ func (m *Manager) TrustOf(name string) (peers.TrustLevel, bool) {
 // Shutdown closes the listener and all connections, and waits for loops.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
+	if !m.closing {
+		// Stops helpers that are not tied to one connection. Guarded because
+		// Shutdown is routinely called more than once (a deferred cleanup
+		// after an explicit one), and closing twice would panic.
+		close(m.closed)
+	}
 	m.closing = true
 	ln := m.ln
 	list := make([]*conn, 0, len(m.conns))
