@@ -140,7 +140,6 @@ func (r *Registry) Chunk(l Link, id, offset uint64, data []byte) {
 		x.recv.fail(err)
 		x.recv.closeDone()
 		_ = l.SendControl(proto.TypeFileCancel, proto.EncodeFileCancel(id, proto.CancelProtocol))
-		l.TransferFinished()
 		r.remove(l.PeerFingerprint(), id)
 	}
 }
@@ -152,7 +151,7 @@ func (r *Registry) Done(l Link, id uint64, digest []byte) {
 		return
 	}
 	defer r.remove(l.PeerFingerprint(), id)
-	defer l.TransferFinished()
+	// closeDone reports the transfer finished; see recv.closeDone.
 	defer x.recv.closeDone()
 	if err := x.recv.Finish(digest); err != nil {
 		x.recv.fail(err)

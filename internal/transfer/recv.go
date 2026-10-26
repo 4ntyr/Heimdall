@@ -208,9 +208,21 @@ func (rc *recv) fail(err error) {
 	rc.notify(Failed)
 }
 
-// closeDone releases anyone waiting to hand this transfer a chunk.
+// closeDone marks this transfer finished: it releases anyone waiting to hand
+// it a chunk, and tells the link the transfer is over.
+//
+// Both belong here rather than at each call site. There are six ways an
+// incoming transfer can end — completion, a chunk that violates the rules, a
+// cancel from the peer, a cancel from the user, a stall, and the connection
+// going away — and a decrement left out of any one of them would strand the
+// link's busy count above zero, permanently marking a healthy connection as
+// carrying a transfer. The sync.Once makes it exactly once however many paths
+// converge here.
 func (rc *recv) closeDone() {
-	rc.closeOne.Do(func() { close(rc.done) })
+	rc.closeOne.Do(func() {
+		close(rc.done)
+		rc.link.TransferFinished()
+	})
 }
 
 func (rc *recv) maybeNotify() {

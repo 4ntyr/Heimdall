@@ -642,3 +642,103 @@ func assertNoFiles(t *testing.T, dir string) {
 		t.Fatalf("expected no files in %s, found %v", dir, names)
 	}
 }
+
+// TestBusyCountReturnsToZero covers a leak that is invisible until much later.
+//
+// The session marks a connection busy while a transfer runs, so duplicate
+// resolution will not swap it out mid-file. If a termination path forgets to
+// report the transfer finished, the count never returns to zero and that
+// connection stays "busy" forever — refusing legitimate replacement by a
+// better path for the rest of the session, with nothing on screen to explain
+// it. There are six ways an incoming transfer can end, so this walks each one
+// and checks the books balance.
+func TestBusyCountReturnsToZero(t *testing.T) {
+	body := []byte("contents")
+	sum := sha256.Sum256(body)
+
+	cases := []struct {
+		name string
+		end  func(t *testing.T, r *Registry, l *fakeLink, rc *recv)
+	}{
+		{"completed", func(t *testing.T, r *Registry, l *fakeLink, rc *recv) {
+			if err := rc.Chunk(0, body, r.Limits().MaxFileSize); err != nil {
+				t.Fatalf("chunk: %v", err)
+			}
+			r.Done(l, 1, sum[:])
+		}},
+		{"digest mismatch", func(t *testing.T, r *Registry, l *fakeLink, rc *recv) {
+			if err := rc.Chunk(0, body, r.Limits().MaxFileSize); err != nil {
+				t.Fatalf("chunk: %v", err)
+			}
+			bad := sha256.Sum256([]byte("forged"))
+			r.Done(l, 1, bad[:])
+		}},
+		{"rule-violating chunk", func(t *testing.T, r *Registry, l *fakeLink, rc *recv) {
+			r.Chunk(l, 1, 999, []byte("x"))
+		}},
+		{"peer cancelled", func(t *testing.T, r *Registry, l *fakeLink, rc *recv) {
+			r.Refuse(l, 1, proto.CancelUserRequest)
+		}},
+		{"user cancelled", func(t *testing.T, r *Registry, l *fakeLink, rc *recv) {
+			if err := r.Cancel(l.fp, 1); err != nil {
+				t.Fatalf("cancel: %v", err)
+			}
+		}},
+		{"connection lost", func(t *testing.T, r *Registry, l *fakeLink, rc *recv) {
+			r.CancelPeer(l.fp)
+		}},
+	}
+
+	for _, c := range cases {
+		lim := DefaultLimits()
+		r, _ := testRegistry(t, lim)
+		l := newFakeLink()
+		offerTo(t, r, l, proto.FileOffer{ID: 1, Size: uint64(len(body)), Name: "a.txt"})
+
+		rc, ok := r.Receiver(l.fp, 1)
+		if !ok {
+			t.Fatalf("%s: offer was not accepted", c.name)
+		}
+		l.mu.Lock()
+		started, finished := l.started, l.finished
+		l.mu.Unlock()
+		if started != 1 || finished != 0 {
+			t.Fatalf("%s: before ending, started=%d finished=%d, want 1 and 0",
+				c.name, started, finished)
+		}
+
+		c.end(t, r, l, rc)
+
+		l.mu.Lock()
+		started, finished = l.started, l.finished
+		l.mu.Unlock()
+		if started != finished {
+			t.Errorf("%s: started=%d finished=%d — the connection would stay busy forever",
+				c.name, started, finished)
+		}
+	}
+}
+
+// TestStalledTransferBalancesBusyCount covers the sixth path, which needs its
+// own timing.
+func TestStalledTransferBalancesBusyCount(t *testing.T) {
+	lim := DefaultLimits()
+	lim.Stall = 20 * time.Millisecond
+	r, _ := testRegistry(t, lim)
+	l := newFakeLink()
+	offerTo(t, r, l, proto.FileOffer{ID: 1, Size: 100, Name: "a.txt"})
+
+	rc, _ := r.Receiver(l.fp, 1)
+	if err := rc.Chunk(0, []byte("partial"), lim.MaxFileSize); err != nil {
+		t.Fatalf("chunk: %v", err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	r.ReapStalled()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.started != l.finished {
+		t.Fatalf("started=%d finished=%d after a stall — the connection would stay busy",
+			l.started, l.finished)
+	}
+}
